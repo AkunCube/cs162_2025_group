@@ -414,7 +414,7 @@ bool load(char* user_cmd, void (**eip)(void), void** esp) {
   char* const argv = (char*)arg_ptr;
   arg_ptr -= 2;
   /* Aligned to a 16-byte boundary at the time the call instruction is executed */
-  arg_ptr = (uintptr_t*)((uintptr_t)arg_ptr & ALIGN_MASK(uintptr_t));
+  arg_ptr = (uintptr_t*)((uintptr_t)arg_ptr & ~0xf);
   arg_ptr[0] = (uintptr_t)argc;
   arg_ptr[1] = (uintptr_t)argv;
 
