@@ -12,6 +12,7 @@ void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "
 
 static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,
+    [SYS_PRACTICE] = sys_practice,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -51,3 +52,8 @@ uint32_t sys_write(uint32_t* args) {
 }
 
 uint32_t sys_exit(uint32_t* args) { return 0; }
+
+uint32_t sys_practice(uint32_t* args) {
+  int i = (int)args[1];
+  return i + 1;
+}

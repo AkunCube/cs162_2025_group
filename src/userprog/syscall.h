@@ -5,5 +5,6 @@
 void syscall_init(void);
 
 uint32_t sys_write(uint32_t*);
+uint32_t sys_practice(uint32_t*);
 
 #endif /* userprog/syscall.h */
