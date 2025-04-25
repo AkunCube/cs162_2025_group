@@ -28,6 +28,20 @@ static thread_func start_pthread NO_RETURN;
 static bool load(char* user_cmd, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 
+typedef struct {
+  char* command;
+  struct process* parent;
+  struct semaphore pexec_sema; // Parent waiting for child loading.
+  bool load_success;
+} start_process_args;
+
+static void init_start_process_args(start_process_args* args, char* command) {
+  args->command = command;
+  args->parent = thread_current()->pcb;
+  args->load_success = false;
+  sema_init(&args->pexec_sema, 0);
+}
+
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
@@ -64,17 +78,33 @@ pid_t process_execute(const char* command) {
     return TID_ERROR;
   strlcpy(fn_copy, command, PGSIZE);
 
+  start_process_args* sargs = (start_process_args*)malloc(sizeof(start_process_args));
+  if (sargs == NULL)
+    return TID_ERROR;
+  // Initialize the args struct, before we create a new thread.
+  init_start_process_args(sargs, fn_copy);
+
   /* Create a new thread to execute COMMAND. */
-  tid = thread_create(command, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
+  tid = thread_create(command, PRI_DEFAULT, start_process, sargs);
+  if (tid == TID_ERROR) {
     palloc_free_page(fn_copy);
-  return tid;
+    free(sargs);
+  }
+
+  //* start_process() will call sema_up() when it is done loading.
+  //* start_process() will also clean up `fn_copy`.
+  // Wait for the child to finish loading.
+  sema_down(&sargs->pexec_sema);
+  bool success = sargs->load_success;
+  free(sargs);
+  return success ? tid : TID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
-static void start_process(void* command) {
-  char* user_cmd = (char*)command;
+static void start_process(void* sargs) {
+  start_process_args* args = (start_process_args*)sargs;
+  char* user_cmd = (char*)args->command;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
@@ -116,6 +146,11 @@ static void start_process(void* command) {
 
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(user_cmd);
+
+  // Wake up the parent thread.
+  args->load_success = success;
+  sema_up(&args->pexec_sema);
+
   if (!success) {
     sema_up(&temporary);
     thread_exit();

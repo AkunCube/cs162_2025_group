@@ -15,6 +15,7 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,
     [SYS_PRACTICE] = sys_practice,
     [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -63,4 +64,9 @@ uint32_t sys_practice(uint32_t* args) {
 uint32_t sys_halt(uint32_t* args UNUSED) {
   shutdown_power_off();
   NOT_REACHED();
+}
+
+uint32_t sys_exec(uint32_t* args) {
+  const char* cmd = (const char*)args[1];
+  return (uint32_t)process_execute(cmd);
 }
