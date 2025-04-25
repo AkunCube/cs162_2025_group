@@ -78,6 +78,8 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
+      // If a process exits due to a fault, make sure print `exit(-1)`.
+      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
       process_exit();
       NOT_REACHED();
 
