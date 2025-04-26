@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "list.h"
 #include "stddef.h"
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
@@ -27,6 +28,8 @@ static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(char* user_cmd, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
+static void handle_exit_wait_status(struct thread* cur, int exit_code);
+static Wait_status* new_and_init_wait_status(pid_t pid);
 
 typedef struct {
   char* command;
@@ -60,6 +63,10 @@ void userprog_init(void) {
 
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
+  t->pcb->main_thread = t;
+  t->pcb->pid = get_pid(t->pcb);
+  t->pcb->ppid = -1;
+  list_init(&t->pcb->children);
 }
 
 /* Starts a new thread running a user program loaded from
@@ -104,6 +111,7 @@ pid_t process_execute(const char* command) {
    running. */
 static void start_process(void* sargs) {
   start_process_args* args = (start_process_args*)sargs;
+  struct process* parent = args->parent;
   char* user_cmd = (char*)args->command;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -123,6 +131,19 @@ static void start_process(void* sargs) {
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    t->pcb->pid = get_pid(t->pcb);
+    t->pcb->ppid = parent->pid;
+    list_init(&t->pcb->children);
+  }
+
+  /* Make a new wait_status and insert it to parent's children list. */
+  if (success) {
+    Wait_status* ws = new_and_init_wait_status(t->pcb->pid);
+    if (ws != NULL) {
+      t->pcb->wait_status = ws;
+      list_push_back(&parent->children, &ws->elem);
+    }
+    success = (ws != NULL);
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -175,9 +196,29 @@ static void start_process(void* sargs) {
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
-  return 0;
+int process_wait(pid_t child_pid) {
+  struct list* childrenLst = &thread_current()->pcb->children;
+  struct list_elem* e;
+  for (e = list_begin(childrenLst); e != list_end(childrenLst); e = list_next(e)) {
+    Wait_status* ws = list_entry(e, Wait_status, elem);
+    if (ws->pid == child_pid) {
+      // Found the child process and wait for it.
+      sema_down(&ws->dead);
+      int exit_code = ws->exit_code;
+      int ref_cnt = -1;
+      lock_acquire(&ws->lock);
+      ref_cnt = --(ws->ref_cnt);
+      lock_release(&ws->lock);
+      ASSERT(ref_cnt == 0);
+      // Remove the child from the list and free the resources.
+      list_remove(e);
+      free(ws);
+      return exit_code;
+    }
+  }
+
+  // Child not found, simply return -1.
+  return -1;
 }
 
 /* Free the current process's resources. */
@@ -206,6 +247,8 @@ void process_exit(void) {
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
+
+  handle_exit_wait_status(cur, cur->pcb->exit_code);
 
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
@@ -669,3 +712,56 @@ void pthread_exit(void) {}
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
 void pthread_exit_main(void) {}
+
+static void handle_exit_wait_status(struct thread* cur, int exit_code) {
+  // Iterate through the list of children and free resources if needed.
+  struct list* childrenLst = &cur->pcb->children;
+  struct list_elem* e;
+  int ref_cnt = -1;
+  for (e = list_begin(childrenLst); e != list_end(childrenLst);) {
+    Wait_status* ws = list_entry(e, Wait_status, elem);
+    lock_acquire(&ws->lock);
+    ref_cnt = --(ws->ref_cnt);
+    lock_release(&ws->lock);
+    if (ref_cnt == 0) {
+      e = list_remove(e);
+      free(ws);
+    } else {
+      e = list_next(e);
+    }
+  }
+
+  Wait_status* ws = cur->pcb->wait_status;
+  if (ws == NULL) {
+    return;
+  }
+
+  // Tell the parent process that this child has exited.
+  ref_cnt = -1;
+  ws->exit_code = exit_code;
+  lock_acquire(&ws->lock);
+  ref_cnt = --(ws->ref_cnt);
+  lock_release(&ws->lock);
+  if (ref_cnt == 0) {
+    // Parent has already exited, so it's now our
+    // duty to free the wait status.
+    free(ws);
+    cur->pcb->wait_status = NULL;
+  } else {
+    // Parent is still alive, so we can just signal it.
+    sema_up(&ws->dead);
+  }
+}
+
+static Wait_status* new_and_init_wait_status(pid_t pid) {
+  Wait_status* ws = (Wait_status*)malloc(sizeof(Wait_status));
+  if (ws == NULL)
+    return NULL;
+
+  ws->pid = pid;
+  lock_init(&ws->lock);
+  ws->ref_cnt = 2;
+  ws->exit_code = 0;
+  sema_init(&ws->dead, 0);
+  return ws;
+}

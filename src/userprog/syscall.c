@@ -19,7 +19,7 @@ void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "
 
 static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write, [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,   [SYS_EXIT] = sys_exit,
+    [SYS_EXEC] = sys_exec,   [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -81,6 +81,12 @@ uint32_t sys_exec(uint32_t* args) {
   validate_string_in_user_region((const char*)args[0]);
   const char* cmd = (const char*)args[0];
   return (uint32_t)process_execute(cmd);
+}
+
+uint32_t sys_wait(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  pid_t pid = (pid_t)args[0];
+  return process_wait(pid);
 }
 
 /********************************************************/

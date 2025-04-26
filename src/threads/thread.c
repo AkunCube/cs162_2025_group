@@ -578,6 +578,8 @@ uint32_t thread_stack_ofs = offsetof(struct thread, stack);
  * @param exit_code 
  */
 void thread_terminate(int exit_code) {
-  printf("%s: exit(%d)\n", thread_current()->pcb->process_name, exit_code);
+  struct process* pcb = thread_current()->pcb;
+  pcb->exit_code = exit_code;
+  printf("%s: exit(%d)\n", pcb->process_name, exit_code);
   process_exit();
 }
