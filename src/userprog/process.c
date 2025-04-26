@@ -134,6 +134,10 @@ static void start_process(void* sargs) {
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
     list_init(&t->pcb->children);
+    // Clear the user open files.
+    for (int i = 2; i < MAX_OPEN_FILE; ++i) {
+      t->pcb->ofile[i] = NULL;
+    }
   }
 
   /* Make a new wait_status and insert it to parent's children list. */
@@ -246,6 +250,15 @@ void process_exit(void) {
     cur->pcb->pagedir = NULL;
     pagedir_activate(NULL);
     pagedir_destroy(pd);
+  }
+
+  // Close all open files.
+  for (int i = 2; i < MAX_OPEN_FILE; ++i) {
+    struct file* of = cur->pcb->ofile[i];
+    if (of != NULL) {
+      file_close(of);
+      cur->pcb->ofile[i] = NULL;
+    }
   }
 
   handle_exit_wait_status(cur, cur->pcb->exit_code);

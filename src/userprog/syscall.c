@@ -9,12 +9,14 @@
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
 #include "filesys/filesys.h"
+#include "filesys/file.h"
 #include "threads/vaddr.h"
 #include "debug.h"
 
 static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
+static int fd_alloc(struct process* pcb);
 static struct lock fileop_lock;
 void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
@@ -24,7 +26,7 @@ void syscall_init(void) {
 static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create,
+    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -107,6 +109,27 @@ uint32_t sys_create(uint32_t* args) {
   return success;
 }
 
+uint32_t sys_open(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* file_name = (const char*)args[0];
+  validate_string_in_user_region(file_name);
+
+  struct file* of = NULL;
+  lock_acquire(&fileop_lock);
+  of = filesys_open(file_name);
+  lock_release(&fileop_lock);
+
+  if (of == NULL) {
+    return -1;
+  }
+  struct process* pcb = thread_current()->pcb;
+  int fd = fd_alloc(pcb);
+  if (fd > 0) {
+    pcb->ofile[fd] = of;
+  }
+  return fd;
+}
+
 /********************************************************/
 /* HELPER FUNCTIONS */
 
@@ -154,4 +177,20 @@ static void validate_string_in_user_region(const char* string) {
   if (strnlen(string, delta) == delta) {
     thread_terminate(-1);
   }
+}
+
+/**
+ * @brief Allocate a file descriptor for the process.
+ * 
+ * @param pcb
+ * @return int
+ */
+static int fd_alloc(struct process* pcb) {
+  for (int i = 2; i < MAX_OPEN_FILE; i++) {
+    if (pcb->ofile[i] == NULL) {
+      return i;
+    }
+  }
+
+  return -1;
 }
