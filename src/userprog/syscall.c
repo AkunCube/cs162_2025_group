@@ -8,18 +8,23 @@
 #include "threads/thread.h"
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "filesys/filesys.h"
 #include "threads/vaddr.h"
 #include "debug.h"
 
 static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
-
-void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
+static struct lock fileop_lock;
+void syscall_init(void) {
+  intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
+  lock_init(&fileop_lock);
+}
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write, [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,   [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
+    [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -87,6 +92,19 @@ uint32_t sys_wait(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   pid_t pid = (pid_t)args[0];
   return process_wait(pid);
+}
+
+uint32_t sys_create(uint32_t* args) {
+  validate_buffer_in_user_region(args, 2 * sizeof(uint32_t));
+  const char* file_name = (const char*)args[0];
+  unsigned initial_size = (unsigned)args[1];
+  validate_string_in_user_region((const char*)args[0]);
+
+  lock_acquire(&fileop_lock);
+  bool success = filesys_create(file_name, initial_size);
+  lock_release(&fileop_lock);
+
+  return success;
 }
 
 /********************************************************/
