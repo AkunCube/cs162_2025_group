@@ -28,7 +28,8 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
     [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell};
+    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek};
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
@@ -214,6 +215,24 @@ uint32_t sys_tell(uint32_t* args) {
   off_t res = file_tell(of);
   lock_release(&fileop_lock);
   return res;
+}
+
+uint32_t sys_seek(uint32_t* args) {
+  validate_buffer_in_user_region(args, 2 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  unsigned position = (unsigned)args[1];
+
+  if (fd > MAX_OPEN_FILE || fd < 0) {
+    return -1;
+  }
+  struct file* of = thread_current()->pcb->ofile[fd];
+  if (of == NULL) {
+    return -1;
+  }
+  lock_acquire(&fileop_lock);
+  file_seek(of, position);
+  lock_release(&fileop_lock);
+  return 0;
 }
 
 /********************************************************/
