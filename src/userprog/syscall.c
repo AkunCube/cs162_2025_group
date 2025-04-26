@@ -1,21 +1,25 @@
 #include "userprog/syscall.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <syscall-nr.h>
 #include "devices/shutdown.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "threads/vaddr.h"
+#include "debug.h"
 
 static void syscall_handler(struct intr_frame*);
+static void validate_buffer_in_user_region(void* buffer, size_t size);
+static void validate_string_in_user_region(const char* string);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,
-    [SYS_PRACTICE] = sys_practice,
-    [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,
+    [SYS_WRITE] = sys_write, [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,   [SYS_EXIT] = sys_exit,
 };
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -30,19 +34,19 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   /* printf("System call number: %d\n", args[0]); */
 
-  if (args[0] == SYS_EXIT) {
-    f->eax = args[1];
-    printf("%s: exit(%d)\n", thread_current()->pcb->process_name, args[1]);
-    process_exit();
-  } else {
-    f->eax = syscalls[args[0]](args);
-  }
+  /* Validate the syscall number */
+  validate_buffer_in_user_region(args, sizeof(uint32_t));
+  int syscall_num = (int)args[0];
+
+  // Passing the real arguments to the syscall function.
+  f->eax = syscalls[syscall_num](&args[1]);
 }
 
 uint32_t sys_write(uint32_t* args) {
-  int fd = (int)args[1];
-  const char* buffer = (const char*)args[2];
-  unsigned size = (unsigned)args[3];
+  validate_buffer_in_user_region(args, 3 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  const char* buffer = (const char*)args[1];
+  unsigned size = (unsigned)args[2];
 
   if (fd == STDOUT_FILENO) {
     putbuf(buffer, size);
@@ -54,10 +58,16 @@ uint32_t sys_write(uint32_t* args) {
   return 0;
 }
 
-uint32_t sys_exit(uint32_t* args) { return 0; }
+uint32_t sys_exit(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int exit_code = (int)args[0];
+  thread_terminate(exit_code);
+  NOT_REACHED();
+}
 
 uint32_t sys_practice(uint32_t* args) {
-  int i = (int)args[1];
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int i = (int)args[0];
   return i + 1;
 }
 
@@ -67,6 +77,57 @@ uint32_t sys_halt(uint32_t* args UNUSED) {
 }
 
 uint32_t sys_exec(uint32_t* args) {
-  const char* cmd = (const char*)args[1];
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  validate_string_in_user_region((const char*)args[0]);
+  const char* cmd = (const char*)args[0];
   return (uint32_t)process_execute(cmd);
+}
+
+/********************************************************/
+/* HELPER FUNCTIONS */
+
+/**
+ * @brief Validate the buffer is in the user region.
+ * 
+ * @param buffer 
+ * @param size 
+ */
+static void validate_buffer_in_user_region(void* buffer, size_t size) {
+  if (buffer == NULL || !is_user_vaddr(buffer)) {
+    thread_terminate(-1);
+  }
+
+  // Check if the buffer is within the user address space.
+  size_t delta = PHYS_BASE - buffer;
+  if (size > delta) {
+    thread_terminate(-1);
+  }
+
+  // Check all pages in the buffer.
+  void* const buffer_end_pg = pg_round_down(buffer + size - 1);
+
+  for (void* p = pg_round_down(buffer); p <= buffer_end_pg; p += PGSIZE) {
+    if (!pagedir_get_page(thread_current()->pcb->pagedir, p)) {
+      thread_terminate(-1);
+    }
+  }
+}
+
+/**
+ * @brief Validate the string is in the user region.
+ * 
+ * @param string 
+ */
+static void validate_string_in_user_region(const char* string) {
+  if (string == NULL || !is_user_vaddr(string)) {
+    thread_terminate(-1);
+  }
+
+  size_t delta = PHYS_BASE - (const void*)string;
+  // Becareful of the string length, it may be larger than the delta.
+  // We cannot check the mapped pages, so when strnlen find a page fault, kernel will
+  // go to the `page_fault()` handler. We let the `page_fault()` handler to handle the error.
+  if (strnlen(string, delta) == delta) {
+    thread_terminate(-1);
+  }
 }

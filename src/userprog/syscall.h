@@ -8,5 +8,6 @@ uint32_t sys_write(uint32_t*);
 uint32_t sys_practice(uint32_t*);
 uint32_t sys_halt(uint32_t*);
 uint32_t sys_exec(uint32_t*);
+uint32_t sys_exit(uint32_t*);
 
 #endif /* userprog/syscall.h */

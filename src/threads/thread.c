@@ -571,3 +571,13 @@ static tid_t allocate_tid(void) {
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
+
+/**
+ * @brief terminate the current thread and exit the process.
+ * 
+ * @param exit_code 
+ */
+void thread_terminate(int exit_code) {
+  printf("%s: exit(%d)\n", thread_current()->pcb->process_name, exit_code);
+  process_exit();
+}
