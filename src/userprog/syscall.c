@@ -29,7 +29,7 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
     [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
     [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek};
+    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove};
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
@@ -233,6 +233,17 @@ uint32_t sys_seek(uint32_t* args) {
   file_seek(of, position);
   lock_release(&fileop_lock);
   return 0;
+}
+
+uint32_t sys_remove(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* file_name = (const char*)args[0];
+  validate_string_in_user_region(file_name);
+
+  lock_acquire(&fileop_lock);
+  bool success = filesys_remove(file_name);
+  lock_release(&fileop_lock);
+  return success;
 }
 
 /********************************************************/
