@@ -26,8 +26,7 @@ void syscall_init(void) {
 static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,
-};
+    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize};
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
@@ -128,6 +127,24 @@ uint32_t sys_open(uint32_t* args) {
     pcb->ofile[fd] = of;
   }
   return fd;
+}
+
+uint32_t sys_filesize(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  if (fd > MAX_OPEN_FILE || fd < 0) {
+    return -1;
+  }
+
+  struct file* of = thread_current()->pcb->ofile[fd];
+  if (of == NULL) {
+    return -1;
+  }
+
+  lock_acquire(&fileop_lock);
+  off_t size = file_length(of);
+  lock_release(&fileop_lock);
+  return size;
 }
 
 /********************************************************/

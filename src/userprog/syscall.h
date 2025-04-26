@@ -12,5 +12,6 @@ uint32_t sys_exit(uint32_t*);
 uint32_t sys_wait(uint32_t*);
 uint32_t sys_create(uint32_t*);
 uint32_t sys_open(uint32_t*);
+uint32_t sys_filesize(uint32_t*);
 
 #endif /* userprog/syscall.h */
