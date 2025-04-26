@@ -50,6 +50,7 @@ struct process {
   char process_name[16];             /* Name of the main thread */
   struct thread* main_thread;        /* Pointer to main thread */
   struct file* ofile[MAX_OPEN_FILE]; /* Open-file table */
+  struct file* elf_file;             /* Current executable file */
   Wait_status* wait_status;          /* Current process wait status, shared with its parent */
   struct list children;              /* Current process spawnning children */
 };

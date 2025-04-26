@@ -81,6 +81,7 @@ static void kill(struct intr_frame* f) {
       intr_dump_frame(f);
       // If a process exits due to a fault, make sure print `exit(-1)`.
       printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
+      thread_current()->pcb->exit_code = -1;
       process_exit();
       NOT_REACHED();
 

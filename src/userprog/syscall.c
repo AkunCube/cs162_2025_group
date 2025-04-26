@@ -15,7 +15,7 @@
 #include "debug.h"
 
 static void syscall_handler(struct intr_frame*);
-static void validate_buffer_in_user_region(void* buffer, size_t size);
+static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
 static int fd_alloc(struct process* pcb);
 static struct lock fileop_lock;
@@ -57,11 +57,27 @@ uint32_t sys_write(uint32_t* args) {
   const char* buffer = (const char*)args[1];
   unsigned size = (unsigned)args[2];
 
+  validate_buffer_in_user_region(buffer, size);
+  if (fd < 0 || fd > MAX_OPEN_FILE) {
+    return -1;
+  }
+
   if (fd == STDOUT_FILENO) {
+    lock_acquire(&fileop_lock);
     putbuf(buffer, size);
+    lock_release(&fileop_lock);
     return size;
+  } else if (fd == STDIN_FILENO) {
+    return -1;
   } else {
-    ASSERT(false);
+    struct file* of = thread_current()->pcb->ofile[fd];
+    if (of == NULL) {
+      return -1;
+    }
+    lock_acquire(&fileop_lock);
+    off_t bytes_written = file_write(of, buffer, size);
+    lock_release(&fileop_lock);
+    return bytes_written;
   }
 
   return 0;
@@ -255,7 +271,7 @@ uint32_t sys_remove(uint32_t* args) {
  * @param buffer 
  * @param size 
  */
-static void validate_buffer_in_user_region(void* buffer, size_t size) {
+static void validate_buffer_in_user_region(const void* buffer, size_t size) {
   if (buffer == NULL || !is_user_vaddr(buffer)) {
     thread_terminate(-1);
   }

@@ -29,6 +29,7 @@ static thread_func start_pthread NO_RETURN;
 static bool load(char* user_cmd, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
+static void handle_exit_close_files(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
 
 typedef struct {
@@ -66,6 +67,7 @@ void userprog_init(void) {
   t->pcb->main_thread = t;
   t->pcb->pid = get_pid(t->pcb);
   t->pcb->ppid = -1;
+  t->pcb->elf_file = NULL;
   list_init(&t->pcb->children);
 }
 
@@ -138,6 +140,7 @@ static void start_process(void* sargs) {
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
       t->pcb->ofile[i] = NULL;
     }
+    t->pcb->elf_file = NULL;
   }
 
   /* Make a new wait_status and insert it to parent's children list. */
@@ -252,15 +255,7 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
-  // Close all open files.
-  for (int i = 2; i < MAX_OPEN_FILE; ++i) {
-    struct file* of = cur->pcb->ofile[i];
-    if (of != NULL) {
-      file_close(of);
-      cur->pcb->ofile[i] = NULL;
-    }
-  }
-
+  handle_exit_close_files(cur);
   handle_exit_wait_status(cur, cur->pcb->exit_code);
 
   /* Free the PCB of this process and kill this thread
@@ -521,7 +516,15 @@ bool load(char* user_cmd, void (**eip)(void), void** esp) {
 
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
+  if (!success) {
+    file_close(file);
+  } else {
+    // ! Must ensure that nobody can modify its executable on disk, so
+    // ! We don't close this executable file on success.
+    file_deny_write(file);
+    t->pcb->elf_file = file;
+  }
+
   return success;
 }
 
@@ -777,4 +780,20 @@ static Wait_status* new_and_init_wait_status(pid_t pid) {
   ws->exit_code = 0;
   sema_init(&ws->dead, 0);
   return ws;
+}
+
+static void handle_exit_close_files(struct thread* cur) {
+  // Close all open files.
+  for (int i = 2; i < MAX_OPEN_FILE; ++i) {
+    struct file* of = cur->pcb->ofile[i];
+    if (of != NULL) {
+      file_close(of);
+      cur->pcb->ofile[i] = NULL;
+    }
+  }
+  // Close elf file.
+  if (cur->pcb->elf_file != NULL) {
+    file_close(cur->pcb->elf_file);
+    cur->pcb->elf_file = NULL;
+  }
 }
