@@ -135,7 +135,7 @@ static void start_process(void* sargs) {
     t->pcb->ppid = parent->pid;
     list_init(&t->pcb->children);
     // Clear the user open files.
-    for (int i = 2; i < MAX_OPEN_FILE; ++i) {
+    for (int i = 0; i < MAX_OPEN_FILE; ++i) {
       t->pcb->ofile[i] = NULL;
     }
   }

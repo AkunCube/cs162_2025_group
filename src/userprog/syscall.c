@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <syscall-nr.h>
+#include "devices/input.h"
 #include "devices/shutdown.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
@@ -26,7 +27,8 @@ void syscall_init(void) {
 static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize};
+    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close};
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
@@ -145,6 +147,57 @@ uint32_t sys_filesize(uint32_t* args) {
   off_t size = file_length(of);
   lock_release(&fileop_lock);
   return size;
+}
+
+uint32_t sys_read(uint32_t* args) {
+  validate_buffer_in_user_region(args, 3 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  uint8_t* buffer = (uint8_t*)args[1];
+  unsigned size = (unsigned)args[2];
+  validate_buffer_in_user_region(buffer, size);
+  if (fd < 0 || fd > MAX_OPEN_FILE) {
+    return -1;
+  }
+
+  if (fd == STDIN_FILENO) {
+    unsigned i = 0;
+    uint8_t ch;
+    lock_acquire(&fileop_lock);
+    for (i = 0; i < size; ++i) {
+      ch = buffer[i] = input_getc();
+      if (ch == '\n') {
+        break;
+      }
+    }
+    lock_release(&fileop_lock);
+    return i;
+  } else {
+    struct file* of = thread_current()->pcb->ofile[fd];
+    if (of == NULL) {
+      return -1;
+    }
+    lock_acquire(&fileop_lock);
+    off_t bytes_read = file_read(of, buffer, size);
+    lock_release(&fileop_lock);
+    return bytes_read;
+  }
+}
+
+uint32_t sys_close(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  if (fd < 0 || fd > MAX_OPEN_FILE) {
+    return -1;
+  }
+  struct file* of = thread_current()->pcb->ofile[fd];
+  if (of == NULL) {
+    return -1;
+  }
+  lock_acquire(&fileop_lock);
+  file_close(of);
+  thread_current()->pcb->ofile[fd] = NULL;
+  lock_release(&fileop_lock);
+  return 0;
 }
 
 /********************************************************/
