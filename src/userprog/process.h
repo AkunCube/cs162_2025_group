@@ -3,6 +3,7 @@
 
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "threads/interrupt.h"
 #include <stdint.h>
 
 // At most 8MB can be allocated to the stack
@@ -61,6 +62,7 @@ pid_t process_execute(const char* cmd);
 int process_wait(pid_t);
 void process_exit(void);
 void process_activate(void);
+pid_t process_fork(const struct intr_frame* if_);
 
 bool is_main_thread(struct thread*, struct process*);
 pid_t get_pid(struct process*);

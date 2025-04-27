@@ -2,12 +2,15 @@
 #include <debug.h>
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
 
 /* An open file. */
 struct file {
-  struct inode* inode; /* File's inode. */
-  off_t pos;           /* Current position. */
-  bool deny_write;     /* Has file_deny_write() been called? */
+  struct inode* inode;   /* File's inode. */
+  off_t pos;             /* Current position. */
+  bool deny_write;       /* Has file_deny_write() been called? */
+  int use_cnt;           /* Number of users. */
+  struct lock file_lock; /* Lock for this file. */
 };
 
 /* Opens a file for the given INODE, of which it takes ownership,
@@ -16,9 +19,11 @@ struct file {
 struct file* file_open(struct inode* inode) {
   struct file* file = calloc(1, sizeof *file);
   if (inode != NULL && file != NULL) {
+    lock_init(&file->file_lock);
     file->inode = inode;
     file->pos = 0;
     file->deny_write = false;
+    file->use_cnt = 1;
     return file;
   } else {
     inode_close(inode);
@@ -33,12 +38,34 @@ struct file* file_reopen(struct file* file) {
   return file_open(inode_reopen(file->inode));
 }
 
+/**
+ * @brief Increments the use count of FILE and returns it.
+ * 
+ * @param file 
+ * @return struct file* 
+ */
+struct file* share_file(struct file* file) {
+  if (file == NULL)
+    return NULL;
+  lock_acquire(&file->file_lock);
+  inode_reopen(file->inode);
+  file->use_cnt++;
+  lock_release(&file->file_lock);
+  return file;
+}
+
 /* Closes FILE. */
 void file_close(struct file* file) {
   if (file != NULL) {
+    int use_cnt = -1;
+    lock_acquire(&file->file_lock);
     file_allow_write(file);
     inode_close(file->inode);
-    free(file);
+    use_cnt = --file->use_cnt;
+    lock_release(&file->file_lock);
+    if (use_cnt == 0) {
+      free(file);
+    }
   }
 }
 

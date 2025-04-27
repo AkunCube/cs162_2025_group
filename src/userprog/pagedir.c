@@ -222,3 +222,49 @@ static void invalidate_pagedir(uint32_t* pd) {
     pagedir_activate(pd);
   }
 }
+
+/**
+ * @brief Copies the page directory from src_pd to dst_pd. This is
+ *        used when a process forks. The new page directory is
+ *        initialized with the same mappings as the old one, but the
+ *        pages are not shared.
+ * 
+ * @param dst_pd 
+ * @param src_pd 
+ * @return true   Copy successfully.
+ * @return false  Copy failed.
+ */
+bool copy_pgd_on_fork(uint32_t* dst_pd, const uint32_t* src_pd) {
+  ASSERT(dst_pd != NULL);
+  ASSERT(src_pd != NULL);
+
+  // Copy the page directory entries from src_pd to dst_pd.
+  for (const uint32_t* pde = src_pd; pde < src_pd + pd_no(PHYS_BASE); ++pde, ++dst_pd) {
+    if (*pde & PTE_P) {
+      // Allocate a new page for the destination page directory.
+      uint32_t* dst_pt = palloc_get_page(PAL_ZERO); // Virtual address
+      if (dst_pt == NULL)
+        return false;
+      *dst_pd = pde_create(dst_pt); // Real physical address
+
+      const uint32_t entries = PGSIZE / sizeof(uint32_t);
+
+      // Copy the page table entries from src_pd to dst_pd.
+      uint32_t* src_pt = pde_get_pt(*pde);
+      for (uint32_t* src_pte = src_pt; src_pte < src_pt + entries; ++src_pte, ++dst_pt) {
+        if (*src_pte & PTE_P) {
+          // Allocate a new page for the destination page table.
+          uint32_t* dst_page = palloc_get_page(PAL_ZERO); // Virtual address
+          if (dst_page == NULL)
+            return false;
+          *dst_pt = pte_create_user(dst_page, *src_pte & PTE_W); // Real physical address
+
+          // Copy the contents of the source page to the destination page.
+          memcpy(dst_page, pte_get_page(*src_pte), PGSIZE);
+        }
+      }
+    }
+  }
+
+  return true;
+}

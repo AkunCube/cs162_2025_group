@@ -15,5 +15,6 @@ bool pagedir_is_accessed(uint32_t* pd, const void* upage);
 void pagedir_set_accessed(uint32_t* pd, const void* upage, bool accessed);
 void pagedir_activate(uint32_t* pd);
 uint32_t* active_pd(void);
+bool copy_pgd_on_fork(uint32_t* dst_pd, const uint32_t* src_pd);
 
 #endif /* userprog/pagedir.h */

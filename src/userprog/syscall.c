@@ -31,7 +31,7 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
     [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove};
 
-static void syscall_handler(struct intr_frame* f UNUSED) {
+static void syscall_handler(struct intr_frame* f) {
   uint32_t* args = ((uint32_t*)f->esp);
 
   /*
@@ -47,8 +47,16 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   validate_buffer_in_user_region(args, sizeof(uint32_t));
   int syscall_num = (int)args[0];
 
-  // Passing the real arguments to the syscall function.
-  f->eax = syscalls[syscall_num](&args[1]);
+  int return_value = -1;
+
+  if (syscall_num == SYS_FORK) {
+    return_value = process_fork(f);
+  } else {
+    // Passing the real arguments to the syscall function.
+    return_value = syscalls[syscall_num](&args[1]);
+  }
+
+  f->eax = return_value;
 }
 
 uint32_t sys_write(uint32_t* args) {

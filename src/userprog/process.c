@@ -31,6 +31,7 @@ bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
 static void handle_exit_close_files(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
+static void perform_fork_operations(void* args);
 
 typedef struct {
   char* command;
@@ -39,8 +40,22 @@ typedef struct {
   bool load_success;
 } start_process_args;
 
+typedef struct {
+  const struct intr_frame* if_;
+  struct process* parent;
+  struct semaphore pexec_sema; // Parent waiting for child loading.
+  bool load_success;
+} fork_process_args;
+
 static void init_start_process_args(start_process_args* args, char* command) {
   args->command = command;
+  args->parent = thread_current()->pcb;
+  args->load_success = false;
+  sema_init(&args->pexec_sema, 0);
+}
+
+static void init_fork_process_args(fork_process_args* args, const struct intr_frame* if_) {
+  args->if_ = if_;
   args->parent = thread_current()->pcb;
   args->load_success = false;
   sema_init(&args->pexec_sema, 0);
@@ -98,6 +113,7 @@ pid_t process_execute(const char* command) {
   if (tid == TID_ERROR) {
     palloc_free_page(fn_copy);
     free(sargs);
+    return tid;
   }
 
   //* start_process() will call sema_up() when it is done loading.
@@ -106,6 +122,26 @@ pid_t process_execute(const char* command) {
   sema_down(&sargs->pexec_sema);
   bool success = sargs->load_success;
   free(sargs);
+  return success ? tid : TID_ERROR;
+}
+
+pid_t process_fork(const struct intr_frame* if_) {
+  struct thread* cur = thread_current();
+  fork_process_args* fargs = (fork_process_args*)malloc(sizeof(fork_process_args));
+  if (fargs == NULL) {
+    return TID_ERROR;
+  }
+  init_fork_process_args(fargs, if_);
+  tid_t tid = thread_create(cur->pcb->process_name, PRI_DEFAULT, perform_fork_operations, fargs);
+
+  if (tid == TID_ERROR) {
+    free(fargs);
+    return tid;
+  }
+
+  sema_down(&fargs->pexec_sema);
+  bool success = fargs->load_success;
+  free(fargs);
   return success ? tid : TID_ERROR;
 }
 
@@ -796,4 +832,90 @@ static void handle_exit_close_files(struct thread* cur) {
     file_close(cur->pcb->elf_file);
     cur->pcb->elf_file = NULL;
   }
+}
+
+/**
+ * @brief Handles the fork operation by creating a child process context. 
+ *        This function initializes a new process control block (PCB), copies 
+ *        resource metadata (e.g., open files, page directory), sets up inter-process 
+ *        relationships (parent/child PID tracking), and prepares the interrupt frame 
+ *        for the child process to resume execution with a fresh address space. 
+ *        Memory allocation failures or resource copy errors will abort the fork and 
+ *        clean up allocated resources.
+ * 
+ * @param args Pointer to fork process arguments containing parent process reference 
+ *             and interrupt frame data.
+ */
+static void perform_fork_operations(void* args) {
+  fork_process_args* fargs = (fork_process_args*)args;
+  struct process* parent = fargs->parent;
+  struct thread* t = thread_current();
+  struct intr_frame cur_if;
+
+  bool success, pcb_success;
+
+  struct process* new_pcb = malloc(sizeof(struct process));
+  success = pcb_success = new_pcb != NULL;
+
+  if (success) {
+    new_pcb->pagedir = NULL;
+    t->pcb = new_pcb;
+    t->pcb->main_thread = t;
+    strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    t->pcb->pid = get_pid(t->pcb);
+    t->pcb->ppid = parent->pid;
+    list_init(&t->pcb->children);
+    // Copy the user open files.
+    for (int i = 0; i < MAX_OPEN_FILE; ++i) {
+      t->pcb->ofile[i] = share_file(parent->ofile[i]);
+    }
+
+    t->pcb->elf_file = share_file(parent->elf_file);
+    file_deny_write(t->pcb->elf_file);
+  }
+
+  // Copy the page directory.
+  if (success) {
+    do {
+      t->pcb->pagedir = pagedir_create();
+      if (t->pcb->pagedir == NULL) {
+        success = false;
+        break;
+      }
+      process_activate();
+      success = copy_pgd_on_fork(t->pcb->pagedir, parent->pagedir);
+    } while (0);
+  }
+
+  if (success) {
+    Wait_status* ws = new_and_init_wait_status(t->pcb->pid);
+    if (ws != NULL) {
+      t->pcb->wait_status = ws;
+      list_push_back(&parent->children, &ws->elem);
+    }
+    success = (ws != NULL);
+  }
+
+  if (success) {
+    memset(&cur_if, 0, sizeof cur_if);
+    // Copy the parent interrupt frame to the child.
+    memcpy(&cur_if, fargs->if_, sizeof(struct intr_frame));
+    // Fork will return 0.
+    cur_if.eax = 0;
+  }
+
+  if (!success && pcb_success) {
+    struct process* pcb_to_free = t->pcb;
+    t->pcb = NULL;
+    free(pcb_to_free);
+  }
+
+  fargs->load_success = success;
+  sema_up(&fargs->pexec_sema);
+
+  if (!success) {
+    thread_exit();
+  }
+  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&cur_if) : "memory");
+  NOT_REACHED();
 }
