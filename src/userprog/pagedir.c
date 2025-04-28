@@ -255,8 +255,12 @@ bool copy_pgd_on_fork(uint32_t* dst_pd, const uint32_t* src_pd) {
         if (*src_pte & PTE_P) {
           // Allocate a new page for the destination page table.
           uint32_t* dst_page = palloc_get_page(PAL_ZERO); // Virtual address
-          if (dst_page == NULL)
+          if (dst_page == NULL) {
+            // Clean up the allocated pages in dst_pd.
+            pagedir_activate(NULL);
+            pagedir_destroy(dst_pt);
             return false;
+          }
           *dst_pt = pte_create_user(dst_page, *src_pte & PTE_W); // Real physical address
 
           // Copy the contents of the source page to the destination page.
