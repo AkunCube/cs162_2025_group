@@ -72,6 +72,10 @@ static struct thread* thread_schedule_fair(void);
 static struct thread* thread_schedule_mlfqs(void);
 static struct thread* thread_schedule_reserved(void);
 
+#define finit() asm("finit")
+#define fsave(state) asm volatile("fsave (%0)" : : "g"(&state))
+#define frstor(state) asm volatile("frstor (%0)" : : "g"(&state))
+
 /* Determines which scheduler the kernel should use.
    Controlled by the kernel command-line options
     "-sched=fifo", "-sched=prio",
@@ -394,6 +398,8 @@ static void idle(void* idle_started_ UNUSED) {
 static void kernel_thread(thread_func* function, void* aux) {
   ASSERT(function != NULL);
 
+  finit(); /* Initialize FPU. */
+
   intr_enable(); /* The scheduler runs with interrupts off. */
   function(aux); /* Execute the thread function. */
   thread_exit(); /* If function() returns, kill the thread. */
@@ -551,8 +557,14 @@ static void schedule(void) {
   ASSERT(cur->status != THREAD_RUNNING);
   ASSERT(is_thread(next));
 
-  if (cur != next)
+  if (cur != next) {
+#define FPU_STATE 108
+    uint8_t fpu_state[FPU_STATE];
+#undef FPU_STATE
+    fsave(fpu_state);
     prev = switch_threads(cur, next);
+    frstor(fpu_state);
+  }
   thread_switch_tail(prev);
 }
 

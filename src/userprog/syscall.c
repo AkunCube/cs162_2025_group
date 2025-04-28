@@ -13,6 +13,7 @@
 #include "filesys/file.h"
 #include "threads/vaddr.h"
 #include "debug.h"
+#include <float.h>
 
 static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(const void* buffer, size_t size);
@@ -29,7 +30,8 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
     [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
     [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove};
+    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+};
 
 static void syscall_handler(struct intr_frame* f) {
   uint32_t* args = ((uint32_t*)f->esp);
@@ -268,6 +270,12 @@ uint32_t sys_remove(uint32_t* args) {
   bool success = filesys_remove(file_name);
   lock_release(&fileop_lock);
   return success;
+}
+
+uint32_t sys_compute_e(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int n = (int)args[0];
+  return sys_sum_to_e(n);
 }
 
 /********************************************************/
