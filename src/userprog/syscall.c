@@ -5,6 +5,7 @@
 #include <syscall-nr.h>
 #include "devices/input.h"
 #include "devices/shutdown.h"
+#include "stddef.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/pagedir.h"
@@ -18,6 +19,7 @@
 static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
+static struct file* validate_file_descriptor(int fd);
 static int fd_alloc(struct process* pcb);
 static struct lock fileop_lock;
 void syscall_init(void) {
@@ -68,7 +70,7 @@ uint32_t sys_write(uint32_t* args) {
   unsigned size = (unsigned)args[2];
 
   validate_buffer_in_user_region(buffer, size);
-  if (fd < 0 || fd > MAX_OPEN_FILE) {
+  if (fd < 0 || fd >= MAX_OPEN_FILE) {
     return -1;
   }
 
@@ -161,11 +163,8 @@ uint32_t sys_open(uint32_t* args) {
 uint32_t sys_filesize(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
-  if (fd > MAX_OPEN_FILE || fd < 0) {
-    return -1;
-  }
 
-  struct file* of = thread_current()->pcb->ofile[fd];
+  struct file* of = validate_file_descriptor(fd);
   if (of == NULL) {
     return -1;
   }
@@ -182,7 +181,7 @@ uint32_t sys_read(uint32_t* args) {
   uint8_t* buffer = (uint8_t*)args[1];
   unsigned size = (unsigned)args[2];
   validate_buffer_in_user_region(buffer, size);
-  if (fd < 0 || fd > MAX_OPEN_FILE) {
+  if (fd < 0 || fd >= MAX_OPEN_FILE) {
     return -1;
   }
 
@@ -213,10 +212,8 @@ uint32_t sys_read(uint32_t* args) {
 uint32_t sys_close(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
-  if (fd < 0 || fd > MAX_OPEN_FILE) {
-    return -1;
-  }
-  struct file* of = thread_current()->pcb->ofile[fd];
+
+  struct file* of = validate_file_descriptor(fd);
   if (of == NULL) {
     return -1;
   }
@@ -230,10 +227,8 @@ uint32_t sys_close(uint32_t* args) {
 uint32_t sys_tell(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
-  if (fd > MAX_OPEN_FILE || fd < 0) {
-    return -1;
-  }
-  struct file* of = thread_current()->pcb->ofile[fd];
+
+  struct file* of = validate_file_descriptor(fd);
   if (of == NULL) {
     return -1;
   }
@@ -248,10 +243,7 @@ uint32_t sys_seek(uint32_t* args) {
   int fd = (int)args[0];
   unsigned position = (unsigned)args[1];
 
-  if (fd > MAX_OPEN_FILE || fd < 0) {
-    return -1;
-  }
-  struct file* of = thread_current()->pcb->ofile[fd];
+  struct file* of = validate_file_descriptor(fd);
   if (of == NULL) {
     return -1;
   }
@@ -341,4 +333,18 @@ static int fd_alloc(struct process* pcb) {
   }
 
   return -1;
+}
+
+/**
+ * @brief Validate the file descriptor.
+ * 
+ * @param fd 
+ * @return struct file* Return the file pointer if valid, otherwise NULL.
+ */
+static struct file* validate_file_descriptor(int fd) {
+  if (fd < 0 || fd >= MAX_OPEN_FILE) {
+    return NULL;
+  }
+
+  return thread_current()->pcb->ofile[fd];
 }
