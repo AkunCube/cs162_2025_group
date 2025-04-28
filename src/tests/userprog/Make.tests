@@ -19,10 +19,12 @@ wait-simple wait-twice wait-killed wait-bad-pid multi-recurse           \
 multi-child-fd rox-simple rox-child rox-multichild bad-read bad-write   \
 bad-read2 bad-write2 bad-jump bad-jump2 iloveos practice stack-align-1  \
 stack-align-2 stack-align-3 stack-align-4 \
-fork-simple fork-nested fork-bad fork-tree fork-file fork-fd fork-offset)
+fork-simple fork-nested fork-bad fork-tree fork-file fork-fd fork-offset \
+floating-point fp-simul fp-asm fp-syscall fp-kernel-e fp-init)
 
 tests/userprog_PROGS = $(tests/userprog_TESTS) $(addprefix \
-tests/userprog/,child-simple child-args child-bad child-close child-rox fork-help)
+tests/userprog/,child-simple child-args child-bad child-close child-rox fork-help \
+compute-e fp-asm-helper)
 
 tests/userprog/iloveos_SRC = tests/userprog/iloveos.c tests/main.c
 tests/userprog/practice_SRC = tests/userprog/practice.c tests/main.c
@@ -127,6 +129,15 @@ tests/userprog/fork-file_SRC = tests/userprog/fork-file.c tests/main.c
 tests/userprog/fork-fd_SRC = tests/userprog/fork-fd.c tests/main.c
 tests/userprog/fork-offset_SRC = tests/userprog/fork-offset.c tests/main.c
 
+tests/userprog/floating-point_SRC = tests/userprog/floating-point.c tests/main.c
+tests/userprog/fp-simul_SRC = tests/userprog/fp-simul.c tests/main.c
+tests/userprog/compute-e_SRC = tests/userprog/compute-e.c
+tests/userprog/fp-asm_SRC = tests/userprog/fp-asm.c tests/main.c
+tests/userprog/fp-asm-helper_SRC = tests/userprog/fp-asm-helper.c
+tests/userprog/fp-syscall_SRC = tests/userprog/fp-syscall.c tests/main.c
+tests/userprog/fp-kernel-e_SRC = tests/userprog/fp-kernel-e.c tests/main.c
+tests/userprog/fp-init_SRC = tests/userprog/fp-init.c tests/main.c
+
 $(foreach prog,$(tests/userprog_PROGS),$(eval $(prog)_SRC += tests/lib.c))
 
 tests/userprog/stack-align-2_ARGS = a
@@ -166,3 +177,6 @@ tests/userprog/rox-child_PUTFILES += tests/userprog/child-rox
 tests/userprog/rox-multichild_PUTFILES += tests/userprog/child-rox
 tests/userprog/fork-tree_PUTFILES += tests/userprog/fork-help
 tests/userprog/fork-file_PUTFILES += tests/userprog/sample.txt
+
+tests/userprog/fp-simul_PUTFILES += tests/userprog/compute-e
+tests/userprog/fp-asm_PUTFILES += tests/userprog/fp-asm-helper

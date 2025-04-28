@@ -72,6 +72,10 @@ static struct thread* thread_schedule_fair(void);
 static struct thread* thread_schedule_mlfqs(void);
 static struct thread* thread_schedule_reserved(void);
 
+#define finit() asm("finit")
+#define fsave(state) asm volatile("fsave (%0)" : : "g"(&state))
+#define frstor(state) asm volatile("frstor (%0)" : : "g"(&state))
+
 /* Determines which scheduler the kernel should use.
    Controlled by the kernel command-line options
     "-sched=fifo", "-sched=prio",
@@ -158,7 +162,7 @@ void thread_print_stats(void) {
          user_ticks);
 }
 
-/* Creates a new kernel thread named NAME with the given initial
+/* Creates a new kernel thread with command COMMAND with the given initial
    PRIORITY, which executes FUNCTION passing AUX as the argument,
    and adds it to the ready queue.  Returns the thread identifier
    for the new thread, or TID_ERROR if creation fails.
@@ -173,7 +177,7 @@ void thread_print_stats(void) {
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
-tid_t thread_create(const char* name, int priority, thread_func* function, void* aux) {
+tid_t thread_create(const char* command, int priority, thread_func* function, void* aux) {
   struct thread* t;
   struct kernel_thread_frame* kf;
   struct switch_entry_frame* ef;
@@ -188,7 +192,7 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
     return TID_ERROR;
 
   /* Initialize thread. */
-  init_thread(t, name, priority);
+  init_thread(t, command, priority);
   tid = t->tid = allocate_tid();
 
   /* Stack frame for kernel_thread(). */
@@ -394,6 +398,8 @@ static void idle(void* idle_started_ UNUSED) {
 static void kernel_thread(thread_func* function, void* aux) {
   ASSERT(function != NULL);
 
+  finit(); /* Initialize FPU. */
+
   intr_enable(); /* The scheduler runs with interrupts off. */
   function(aux); /* Execute the thread function. */
   thread_exit(); /* If function() returns, kill the thread. */
@@ -414,18 +420,25 @@ struct thread* running_thread(void) {
 /* Returns true if T appears to point to a valid thread. */
 static bool is_thread(struct thread* t) { return t != NULL && t->magic == THREAD_MAGIC; }
 
-/* Does basic initialization of T as a blocked thread named
-   NAME. */
-static void init_thread(struct thread* t, const char* name, int priority) {
+/* Does basic initialization of T as a blocked thread command
+   COMMAND. */
+static void init_thread(struct thread* t, const char* command, int priority) {
   enum intr_level old_level;
 
   ASSERT(t != NULL);
   ASSERT(PRI_MIN <= priority && priority <= PRI_MAX);
-  ASSERT(name != NULL);
+  ASSERT(command != NULL);
 
   memset(t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
-  strlcpy(t->name, name, sizeof t->name);
+
+  // Find the thread name.
+  size_t thread_name_size = strcspn(command, " ") + 1;
+  if (thread_name_size > sizeof t->name)
+    thread_name_size = sizeof t->name;
+  strlcpy(t->name, command, thread_name_size);
+  t->name[thread_name_size - 1] = '\0';
+
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
   t->pcb = NULL;
@@ -544,8 +557,14 @@ static void schedule(void) {
   ASSERT(cur->status != THREAD_RUNNING);
   ASSERT(is_thread(next));
 
-  if (cur != next)
+  if (cur != next) {
+#define FPU_STATE 108
+    uint8_t fpu_state[FPU_STATE];
+#undef FPU_STATE
+    fsave(fpu_state);
     prev = switch_threads(cur, next);
+    frstor(fpu_state);
+  }
   thread_switch_tail(prev);
 }
 
@@ -564,3 +583,15 @@ static tid_t allocate_tid(void) {
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
+
+/**
+ * @brief terminate the current thread and exit the process.
+ * 
+ * @param exit_code 
+ */
+void thread_terminate(int exit_code) {
+  struct process* pcb = thread_current()->pcb;
+  pcb->exit_code = exit_code;
+  printf("%s: exit(%d)\n", pcb->process_name, exit_code);
+  process_exit();
+}

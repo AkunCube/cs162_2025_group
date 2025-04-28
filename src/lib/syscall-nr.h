@@ -18,6 +18,7 @@ enum {
   SYS_TELL,         /* Report current position in a file. */
   SYS_CLOSE,        /* Close a file. */
   SYS_PRACTICE,     /* Returns arg incremented by 1 */
+  SYS_COMPUTE_E,    /* Computes e */
   SYS_PT_CREATE,    /* Creates a new thread */
   SYS_PT_EXIT,      /* Exits the current thread */
   SYS_PT_JOIN,      /* Waits for thread to finish */

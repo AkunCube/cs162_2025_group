@@ -13,6 +13,9 @@
 #include "userprog/gdt.h"
 #endif
 
+#define fsave(state) asm volatile("fsave (%0)" : : "g"(&state))
+#define frstor(state) asm volatile("frstor (%0)" : : "g"(&state))
+
 /* Programmable Interrupt Controller (PIC) registers.
    A PC has two PICs, called the master and slave PICs, with the
    slave attached ("cascaded") to the master IRQ line 2. */
@@ -317,6 +320,10 @@ static inline bool is_trap_from_userspace(struct intr_frame* frame) {
    intr-stubs.S.  FRAME describes the interrupt and the
    interrupted thread's registers. */
 void intr_handler(struct intr_frame* frame) {
+#define FPU_SIZE 108
+  uint8_t fpu_state[FPU_SIZE];
+#undef FPU_SIZE
+  fsave(fpu_state); // Save FPU state
   bool external;
   intr_handler_func* handler;
 
@@ -355,6 +362,8 @@ void intr_handler(struct intr_frame* frame) {
     if (yield_on_return)
       thread_yield();
   }
+
+  frstor(fpu_state); // Restore FPU state
 }
 
 /* Handles an unexpected interrupt with interrupt frame F.  An
