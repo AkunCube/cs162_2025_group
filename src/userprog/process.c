@@ -26,18 +26,22 @@
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(char* user_cmd, void (**eip)(void), void** esp);
+static bool load(const char** user_argv, int argc, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
 static void handle_exit_close_files(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
 static void perform_fork_operations(void* args);
+static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
 
 typedef struct {
   char* command;
   struct process* parent;
   struct semaphore pexec_sema; // Parent waiting for child loading.
   bool load_success;
+#define MAX_ARGS 64
+  const char* user_argv[MAX_ARGS];
+  int argc;
 } start_process_args;
 
 typedef struct {
@@ -49,10 +53,13 @@ typedef struct {
 
 static void init_start_process_args(start_process_args* args, char* command) {
   args->command = command;
+  // Parse the user command to get the executable name and arguments
+  args->argc = parse_user_command(command, args->user_argv, MAX_ARGS);
   args->parent = thread_current()->pcb;
   args->load_success = false;
   sema_init(&args->pexec_sema, 0);
 }
+#undef MAX_ARGS
 
 static void init_fork_process_args(fork_process_args* args, const struct intr_frame* if_) {
   args->if_ = if_;
@@ -108,8 +115,8 @@ pid_t process_execute(const char* command) {
   // Initialize the args struct, before we create a new thread.
   init_start_process_args(sargs, fn_copy);
 
-  /* Create a new thread to execute COMMAND. */
-  tid = thread_create(command, PRI_DEFAULT, start_process, sargs);
+  // Since we already have parsed the command line, we can pass the name here.
+  tid = thread_create(sargs->user_argv[0], PRI_DEFAULT, start_process, sargs);
   if (tid == TID_ERROR) {
     palloc_free_page(fn_copy);
     free(sargs);
@@ -151,6 +158,8 @@ static void start_process(void* sargs) {
   start_process_args* args = (start_process_args*)sargs;
   struct process* parent = args->parent;
   char* user_cmd = (char*)args->command;
+  const char** user_argv = args->user_argv;
+  int argc = args->argc;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
@@ -195,7 +204,7 @@ static void start_process(void* sargs) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(user_cmd, &if_.eip, &if_.esp);
+    success = load(user_argv, argc, &if_.eip, &if_.esp);
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -413,7 +422,7 @@ static int parse_user_command(char* user_cmd, const char* user_argv[], const int
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(char* user_cmd, void (**eip)(void), void** esp) {
+bool load(const char** user_argv, int argc, void (**eip)(void), void** esp) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
@@ -427,11 +436,6 @@ bool load(char* user_cmd, void (**eip)(void), void** esp) {
     goto done;
   process_activate();
 
-// Parse the user command to get the executable name and arguments
-#define MAX_ARGS 64
-  static const char* user_argv[MAX_ARGS] = {NULL};
-  int argc = parse_user_command(user_cmd, user_argv, MAX_ARGS);
-#undef MAX_ARGS
   ASSERT(argc > 0);
   ASSERT(user_argv[0] != NULL);
 
