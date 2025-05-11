@@ -158,7 +158,7 @@ static void start_process(void* sargs) {
   start_process_args* args = (start_process_args*)sargs;
   struct process* parent = args->parent;
   char* user_cmd = (char*)args->command;
-  char** user_argv = (char**)args->user_argv;
+  const char** user_argv = args->user_argv;
   int argc = args->argc;
   struct thread* t = thread_current();
   struct intr_frame if_;
