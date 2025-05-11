@@ -162,7 +162,7 @@ void thread_print_stats(void) {
          user_ticks);
 }
 
-/* Creates a new kernel thread with command COMMAND with the given initial
+/* Creates a new kernel thread with name NAME with the given initial
    PRIORITY, which executes FUNCTION passing AUX as the argument,
    and adds it to the ready queue.  Returns the thread identifier
    for the new thread, or TID_ERROR if creation fails.
@@ -177,7 +177,7 @@ void thread_print_stats(void) {
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
-tid_t thread_create(const char* command, int priority, thread_func* function, void* aux) {
+tid_t thread_create(const char* name, int priority, thread_func* function, void* aux) {
   struct thread* t;
   struct kernel_thread_frame* kf;
   struct switch_entry_frame* ef;
@@ -192,7 +192,7 @@ tid_t thread_create(const char* command, int priority, thread_func* function, vo
     return TID_ERROR;
 
   /* Initialize thread. */
-  init_thread(t, command, priority);
+  init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
 
   /* Stack frame for kernel_thread(). */
@@ -420,24 +420,19 @@ struct thread* running_thread(void) {
 /* Returns true if T appears to point to a valid thread. */
 static bool is_thread(struct thread* t) { return t != NULL && t->magic == THREAD_MAGIC; }
 
-/* Does basic initialization of T as a blocked thread command
-   COMMAND. */
-static void init_thread(struct thread* t, const char* command, int priority) {
+/* Does basic initialization of T as a blocked thread name
+   NAME. */
+static void init_thread(struct thread* t, const char* name, int priority) {
   enum intr_level old_level;
 
   ASSERT(t != NULL);
   ASSERT(PRI_MIN <= priority && priority <= PRI_MAX);
-  ASSERT(command != NULL);
+  ASSERT(name != NULL);
 
   memset(t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
 
-  // Find the thread name.
-  size_t thread_name_size = strcspn(command, " ") + 1;
-  if (thread_name_size > sizeof t->name)
-    thread_name_size = sizeof t->name;
-  strlcpy(t->name, command, thread_name_size);
-  t->name[thread_name_size - 1] = '\0';
+  strlcpy(t->name, name, sizeof(t->name));
 
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
