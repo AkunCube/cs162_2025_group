@@ -26,7 +26,7 @@
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(char** user_argv, int argc, void (**eip)(void), void** esp);
+static bool load(const char** user_argv, int argc, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
 static void handle_exit_close_files(struct thread* cur);
@@ -422,7 +422,7 @@ static int parse_user_command(char* user_cmd, const char* user_argv[], const int
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(char** user_argv, int argc, void (**eip)(void), void** esp) {
+bool load(const char** user_argv, int argc, void (**eip)(void), void** esp) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
