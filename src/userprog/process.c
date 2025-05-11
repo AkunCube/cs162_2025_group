@@ -26,7 +26,7 @@
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-bool load(char** user_argv, int argc, void (**eip)(void), void** esp);
+static bool load(char** user_argv, int argc, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
 static void handle_exit_close_files(struct thread* cur);
