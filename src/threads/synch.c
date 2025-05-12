@@ -32,6 +32,9 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static bool cond_signal_less_func(const struct list_elem* a, const struct list_elem* b,
+                                  void* aux UNUSED);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -102,8 +105,13 @@ void sema_up(struct semaphore* sema) {
   ASSERT(sema != NULL);
 
   old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
-    thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+  if (!list_empty(&sema->waiters)) {
+    // Find the thread with the highest priority in the waiters list.
+    struct list_elem* max_elem = list_max(&sema->waiters, thread_priority_less, NULL);
+    struct thread* t = list_entry(max_elem, struct thread, elem);
+    list_remove(max_elem);
+    thread_unblock(t);
+  }
   sema->value++;
   intr_set_level(old_level);
 }
@@ -207,6 +215,11 @@ void lock_release(struct lock* lock) {
 
   lock->holder = NULL;
   sema_up(&lock->semaphore);
+
+  //! IMPORTANT: We don't want to yield if we are in an interrupt context.
+  if (intr_get_level() == INTR_ON) {
+    thread_yield();
+  }
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -339,8 +352,12 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
 
-  if (!list_empty(&cond->waiters))
-    sema_up(&list_entry(list_pop_front(&cond->waiters), struct semaphore_elem, elem)->semaphore);
+  if (!list_empty(&cond->waiters)) {
+    // Find the thread with the highest priority in the waiters list.
+    struct list_elem* max_elem = list_max(&cond->waiters, cond_signal_less_func, NULL);
+    list_remove(max_elem);
+    sema_up(&list_entry(max_elem, struct semaphore_elem, elem)->semaphore);
+  }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -355,4 +372,13 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
 
   while (!list_empty(&cond->waiters))
     cond_signal(cond, lock);
+}
+
+static bool cond_signal_less_func(const struct list_elem* a, const struct list_elem* b,
+                                  void* aux UNUSED) {
+  struct semaphore_elem* a_sema = list_entry(a, struct semaphore_elem, elem);
+  struct semaphore_elem* b_sema = list_entry(b, struct semaphore_elem, elem);
+  struct thread* a_thread = list_entry(list_begin(&a_sema->semaphore.waiters), struct thread, elem);
+  struct thread* b_thread = list_entry(list_begin(&b_sema->semaphore.waiters), struct thread, elem);
+  return a_thread->priority < b_thread->priority;
 }

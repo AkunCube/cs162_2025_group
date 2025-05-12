@@ -24,6 +24,10 @@
    that are ready to run but not actually running. */
 static struct list fifo_ready_list;
 
+/* List of processes eligible for execution but not currently running,
+   managed using a priority scheduling policy. */
+static struct list prio_ready_list;
+
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
@@ -112,6 +116,7 @@ void thread_init(void) {
 
   lock_init(&tid_lock);
   list_init(&fifo_ready_list);
+  list_init(&prio_ready_list);
   list_init(&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -213,6 +218,8 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Add to run queue. */
   thread_unblock(t);
 
+  // If the new thread has a higher priority than the current.
+  thread_yield();
   return tid;
 }
 
@@ -240,6 +247,8 @@ static void thread_enqueue(struct thread* t) {
 
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&fifo_ready_list, &t->elem);
+  else if (active_sched_policy == SCHED_PRIO)
+    list_push_back(&prio_ready_list, &t->elem);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -465,7 +474,14 @@ static struct thread* thread_schedule_fifo(void) {
 
 /* Strict priority scheduler */
 static struct thread* thread_schedule_prio(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=prio\"");
+  if (!list_empty(&prio_ready_list)) {
+    // Find the max priority thread in the list
+    struct list_elem* max_elem = list_max(&prio_ready_list, thread_priority_less, NULL);
+    struct thread* t = list_entry(max_elem, struct thread, elem);
+    list_remove(max_elem);
+    return t;
+  } else
+    return idle_thread;
 }
 
 /* Fair priority scheduler */
@@ -589,4 +605,24 @@ void thread_terminate(int exit_code) {
   pcb->exit_code = exit_code;
   printf("%s: exit(%d)\n", pcb->process_name, exit_code);
   process_exit();
+}
+
+/**
+ * @brief Compare thread priorities for sorting in a priority queue
+ * 
+ * This function is a comparison callback for list_sort(), 
+ * used to order threads by their priority values. It enables 
+ * higher-priority threads to be positioned earlier in the list.
+ * 
+ * @param a Pointer to the first thread's list element
+ * @param b Pointer to the second thread's list element
+ * @param aux Unused auxiliary data (required by list_sort API)
+ * 
+ * @return true if thread a has lower priority than thread b
+ * @return false if thread a has higher or equal priority to thread b
+ */
+bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED) {
+  struct thread* t1 = list_entry(a, struct thread, elem);
+  struct thread* t2 = list_entry(b, struct thread, elem);
+  return t1->priority < t2->priority;
 }
