@@ -187,6 +187,11 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
 
+  if (lock->holder != NULL) {
+    // If the lock is already held, we need to donate our priority.
+    thread_donate_priority(lock->holder, thread_current());
+  }
+
   sema_down(&lock->semaphore);
   lock->holder = thread_current();
 }
@@ -219,6 +224,11 @@ void lock_release(struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   lock->holder = NULL;
+
+  // If we are releasing the lock, we need to reset our priority.
+  //! IMPORTANT: do not use thread_set_priority() here, as it will
+  //! yield the CPU before sema_up() is called.
+  thread_restore_priority(thread_current());
   sema_up(&lock->semaphore);
 }
 
@@ -380,5 +390,5 @@ static bool cond_signal_less_func(const struct list_elem* a, const struct list_e
   struct semaphore_elem* b_sema = list_entry(b, struct semaphore_elem, elem);
   struct thread* a_thread = list_entry(list_begin(&a_sema->semaphore.waiters), struct thread, elem);
   struct thread* b_thread = list_entry(list_begin(&b_sema->semaphore.waiters), struct thread, elem);
-  return a_thread->priority < b_thread->priority;
+  return a_thread->effective_priority < b_thread->effective_priority;
 }

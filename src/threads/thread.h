@@ -152,5 +152,7 @@ int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
 void thread_terminate(int exit_code);
 bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED);
+void thread_donate_priority(struct thread* target, struct thread* donor);
+void thread_restore_priority(struct thread* t);
 
 #endif /* threads/thread.h */

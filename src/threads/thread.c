@@ -15,6 +15,8 @@
 #include "userprog/process.h"
 #endif
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
@@ -342,14 +344,17 @@ void thread_foreach(thread_action_func* func, void* aux) {
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void thread_set_priority(int new_priority) {
-  thread_current()->priority = new_priority;
+  struct thread* cur = thread_current();
+  cur->priority = cur->effective_priority = new_priority;
 
   // Since pintos now is a preemptive kernel, we need to yield.
-  thread_yield();
+  if (intr_get_level() == INTR_ON) {
+    thread_yield();
+  }
 }
 
-/* Returns the current thread's priority. */
-int thread_get_priority(void) { return thread_current()->priority; }
+/* Returns the current thread's effective_priority. */
+int thread_get_priority(void) { return thread_current()->effective_priority; }
 
 /* Sets the current thread's nice value to NICE. */
 void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */
@@ -449,7 +454,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   strlcpy(t->name, name, sizeof(t->name));
 
   t->stack = (uint8_t*)t + PGSIZE;
-  t->priority = priority;
+  t->effective_priority = t->priority = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
 
@@ -629,5 +634,11 @@ void thread_terminate(int exit_code) {
 bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED) {
   struct thread* t1 = list_entry(a, struct thread, elem);
   struct thread* t2 = list_entry(b, struct thread, elem);
-  return t1->priority < t2->priority;
+  return t1->effective_priority < t2->effective_priority;
 }
+
+void thread_donate_priority(struct thread* target, struct thread* donor) {
+  target->effective_priority = MAX(target->effective_priority, donor->effective_priority);
+}
+
+void thread_restore_priority(struct thread* t) { t->effective_priority = t->priority; }
