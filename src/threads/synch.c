@@ -114,6 +114,11 @@ void sema_up(struct semaphore* sema) {
   }
   sema->value++;
   intr_set_level(old_level);
+
+  //! IMPORTANT: We don't want to yield if we are in an interrupt context.
+  if (intr_get_level() == INTR_ON) {
+    thread_yield();
+  }
 }
 
 static void sema_test_helper(void* sema_);
@@ -215,11 +220,6 @@ void lock_release(struct lock* lock) {
 
   lock->holder = NULL;
   sema_up(&lock->semaphore);
-
-  //! IMPORTANT: We don't want to yield if we are in an interrupt context.
-  if (intr_get_level() == INTR_ON) {
-    thread_yield();
-  }
 }
 
 /* Returns true if the current thread holds LOCK, false
