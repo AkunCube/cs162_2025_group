@@ -663,7 +663,7 @@ void thread_update_effective_priority(struct thread* t) {
   ASSERT(t == thread_current());
 
   // Restore the thread's priority to the max of its held locks.
-  struct list_elem* max_elem = list_max(&t->held_locks, thread_priority_less, NULL);
+  struct list_elem* max_elem = list_max(&t->held_locks, lock_priority_less, NULL);
   int max_priority = PRI_MIN;
   if (max_elem != list_end(&t->held_locks)) {
     struct lock* l = list_entry(max_elem, struct lock, elem);

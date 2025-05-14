@@ -421,3 +421,9 @@ static bool cond_signal_less_func(const struct list_elem* a, const struct list_e
   struct thread* b_thread = list_entry(list_begin(&b_sema->semaphore.waiters), struct thread, elem);
   return a_thread->effective_priority < b_thread->effective_priority;
 }
+
+bool lock_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED) {
+  struct lock* t1 = list_entry(a, struct lock, elem);
+  struct lock* t2 = list_entry(b, struct lock, elem);
+  return t1->waiters_priority < t2->waiters_priority;
+}
