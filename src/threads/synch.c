@@ -32,6 +32,8 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 static bool cond_signal_less_func(const struct list_elem* a, const struct list_elem* b,
                                   void* aux UNUSED);
 
@@ -49,6 +51,7 @@ void sema_init(struct semaphore* sema, unsigned value) {
 
   sema->value = value;
   list_init(&sema->waiters);
+  sema->lock = NULL;
 }
 
 /* Down or "P" operation on a semaphore.  Waits for SEMA's value
@@ -66,10 +69,17 @@ void sema_down(struct semaphore* sema) {
 
   old_level = intr_disable();
   while (sema->value == 0) {
+    // If this semaphore is associated with a lock, we need to update the waiters priority
+    // inorder to support priority donation.
+    if (sema->lock != NULL) {
+      sema->lock->waiters_priority =
+          MAX(sema->lock->waiters_priority, thread_current()->effective_priority);
+    }
     list_push_back(&sema->waiters, &thread_current()->elem);
     thread_block();
   }
   sema->value--;
+  //! We leave the lock acquire function to update the waiters priority.
   intr_set_level(old_level);
 }
 
@@ -172,6 +182,8 @@ void lock_init(struct lock* lock) {
 
   lock->holder = NULL;
   sema_init(&lock->semaphore, 1);
+  lock->semaphore.lock = lock;
+  lock->waiters_priority = PRI_MIN;
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
@@ -194,6 +206,20 @@ void lock_acquire(struct lock* lock) {
 
   sema_down(&lock->semaphore);
   lock->holder = thread_current();
+  list_push_back(&thread_current()->held_locks, &lock->elem);
+
+  // Check list is an atomic operation, since other threads may be
+  // trying to acquire or release the lock at the same time.
+  enum intr_level old_level = intr_disable();
+  // Since we are removed from the waiters list, we need to update the lock's waiters priority.
+  struct list_elem* max_elem = list_max(&lock->semaphore.waiters, thread_priority_less, NULL);
+  if (max_elem != list_end(&lock->semaphore.waiters)) {
+    struct thread* t = list_entry(max_elem, struct thread, elem);
+    lock->waiters_priority = t->effective_priority;
+  } else {
+    lock->waiters_priority = PRI_MIN;
+  }
+  intr_set_level(old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -224,11 +250,14 @@ void lock_release(struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   lock->holder = NULL;
+  // Remove the lock from the list of held locks.
+  list_remove(&lock->elem);
 
-  // If we are releasing the lock, we need to reset our priority.
+  // We need to change our effective priority.
+  // This is important for priority donation.
   //! IMPORTANT: do not use thread_set_priority() here, as it will
   //! yield the CPU before sema_up() is called.
-  thread_restore_priority(thread_current());
+  thread_update_effective_priority(thread_current());
   sema_up(&lock->semaphore);
 }
 

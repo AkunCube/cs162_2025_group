@@ -100,6 +100,9 @@ struct thread {
 
   int64_t sleep_ticks;    /* Number of ticks to sleep */
   int effective_priority; /* Effective priority */
+
+  /* Owned by synch.c. */
+  struct list held_locks; /* List of locks held by this thread. */
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };
@@ -153,6 +156,6 @@ int thread_get_load_avg(void);
 void thread_terminate(int exit_code);
 bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED);
 void thread_donate_priority(struct thread* target, struct thread* donor);
-void thread_restore_priority(struct thread* t);
+void thread_update_effective_priority(struct thread* t);
 
 #endif /* threads/thread.h */

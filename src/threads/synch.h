@@ -4,10 +4,13 @@
 #include <list.h>
 #include <stdbool.h>
 
+struct lock;
+
 /* A counting semaphore. */
 struct semaphore {
   unsigned value;      /* Current value. */
   struct list waiters; /* List of waiting threads. */
+  struct lock* lock;   /* Lock held by this semaphore, maybe NULL */
 };
 
 void sema_init(struct semaphore*, unsigned value);
@@ -20,6 +23,8 @@ void sema_self_test(void);
 struct lock {
   struct thread* holder;      /* Thread holding lock (for debugging). */
   struct semaphore semaphore; /* Binary semaphore controlling access. */
+  int waiters_priority;       /* Highest priority of waiters. */
+  struct list_elem elem;      /* List element for the threads's held_locks. */
 };
 
 void lock_init(struct lock*);

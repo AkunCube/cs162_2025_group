@@ -345,7 +345,11 @@ void thread_foreach(thread_action_func* func, void* aux) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void thread_set_priority(int new_priority) {
   struct thread* cur = thread_current();
-  cur->priority = cur->effective_priority = new_priority;
+
+  ASSERT(new_priority >= PRI_MIN && new_priority <= PRI_MAX);
+  cur->priority = new_priority;
+  // We need to update the effective priority.
+  thread_update_effective_priority(cur);
 
   // Since pintos now is a preemptive kernel, we need to yield.
   if (intr_get_level() == INTR_ON) {
@@ -457,6 +461,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->effective_priority = t->priority = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
+  list_init(&t->held_locks);
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
@@ -641,4 +646,28 @@ void thread_donate_priority(struct thread* target, struct thread* donor) {
   target->effective_priority = MAX(target->effective_priority, donor->effective_priority);
 }
 
-void thread_restore_priority(struct thread* t) { t->effective_priority = t->priority; }
+/**
+ * @brief Update the effective priority of the current thread
+ * 
+ * This function recalculates and updates the effective priority of the thread
+ * based on the locks it currently holds. The effective priority is defined as the
+ * higher value between the thread's base priority and the highest priority among
+ * all locks it holds. 
+ * 
+ * @param t Pointer to the thread structure whose priority is to be updated.
+ *          Must be the currently executing thread (i.e., thread_current()).
+ */
+void thread_update_effective_priority(struct thread* t) {
+  ASSERT(t != NULL);
+  ASSERT(is_thread(t));
+  ASSERT(t == thread_current());
+
+  // Restore the thread's priority to the max of its held locks.
+  struct list_elem* max_elem = list_max(&t->held_locks, thread_priority_less, NULL);
+  int max_priority = PRI_MIN;
+  if (max_elem != list_end(&t->held_locks)) {
+    struct lock* l = list_entry(max_elem, struct lock, elem);
+    max_priority = l->waiters_priority;
+  }
+  t->effective_priority = MAX(max_priority, t->priority);
+}
