@@ -72,6 +72,7 @@ void sema_down(struct semaphore* sema) {
     // If this semaphore is associated with a lock, we need to update the waiters priority
     // inorder to support priority donation.
     if (sema->lock != NULL) {
+      thread_current()->waiting_lock = sema->lock;
       sema->lock->waiters_priority =
           MAX(sema->lock->waiters_priority, thread_current()->effective_priority);
     }
@@ -211,6 +212,8 @@ void lock_acquire(struct lock* lock) {
   // Check list is an atomic operation, since other threads may be
   // trying to acquire or release the lock at the same time.
   enum intr_level old_level = intr_disable();
+  // We are now the holder of the lock, remove the waiting lock.
+  thread_current()->waiting_lock = NULL;
   // Since we are removed from the waiters list, we need to update the lock's waiters priority.
   struct list_elem* max_elem = list_max(&lock->semaphore.waiters, thread_priority_less, NULL);
   if (max_elem != list_end(&lock->semaphore.waiters)) {
@@ -219,6 +222,8 @@ void lock_acquire(struct lock* lock) {
   } else {
     lock->waiters_priority = PRI_MIN;
   }
+
+  thread_update_effective_priority(thread_current());
   intr_set_level(old_level);
 }
 

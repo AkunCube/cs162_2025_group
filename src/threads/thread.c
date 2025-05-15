@@ -643,7 +643,28 @@ bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, 
 }
 
 void thread_donate_priority(struct thread* target, struct thread* donor) {
+  ASSERT(target != NULL);
+  ASSERT(donor != NULL);
+  enum intr_level old_level = intr_disable();
+
+  // We don't need to do anything if the target thread has a higher priority.
+  if (target->effective_priority >= donor->effective_priority) {
+    intr_set_level(old_level);
+    return;
+  }
+
+  while (target->waiting_lock != NULL) {
+    struct thread* next = target->waiting_lock->holder;
+    ASSERT(next != NULL);
+    ASSERT(is_thread(next));
+    if (next->effective_priority > target->effective_priority) {
+      break;
+    }
+    target = next;
+  }
   target->effective_priority = MAX(target->effective_priority, donor->effective_priority);
+
+  intr_set_level(old_level);
 }
 
 /**

@@ -102,7 +102,8 @@ struct thread {
   int effective_priority; /* Effective priority */
 
   /* Owned by synch.c. */
-  struct list held_locks; /* List of locks held by this thread. */
+  struct list held_locks;    /* List of locks held by this thread. */
+  struct lock* waiting_lock; /* Lock that this thread is waiting for. */
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };
