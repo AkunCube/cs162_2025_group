@@ -5,6 +5,7 @@
 #include <syscall-nr.h>
 #include "devices/input.h"
 #include "devices/shutdown.h"
+#include "stdbool.h"
 #include "stddef.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
@@ -28,11 +29,12 @@ void syscall_init(void) {
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_WRITE] = sys_write,         [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,           [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,       [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,           [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek,           [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_LOCK_INIT] = sys_lock_init,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -268,6 +270,16 @@ uint32_t sys_compute_e(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int n = (int)args[0];
   return sys_sum_to_e(n);
+}
+
+uint32_t sys_lock_init(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  struct lock* lock = (struct lock*)args[0];
+  if (lock == NULL) {
+    return false;
+  }
+  lock_init(lock);
+  return true;
 }
 
 /********************************************************/

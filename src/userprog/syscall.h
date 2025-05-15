@@ -19,5 +19,6 @@ uint32_t sys_tell(uint32_t*);
 uint32_t sys_seek(uint32_t*);
 uint32_t sys_remove(uint32_t*);
 uint32_t sys_compute_e(uint32_t*);
+uint32_t sys_lock_init(uint32_t*);
 
 #endif /* userprog/syscall.h */
