@@ -222,7 +222,8 @@ void lock_acquire(struct lock* lock) {
   } else {
     lock->waiters_priority = PRI_MIN;
   }
-
+  // The lock's waiters priority may have changed, so we need to update the
+  // effective priority of the current thread.
   thread_update_effective_priority(thread_current());
   intr_set_level(old_level);
 }

@@ -642,6 +642,23 @@ bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, 
   return t1->effective_priority < t2->effective_priority;
 }
 
+/**
+ * @brief Performs priority donation to resolve priority inversion issues in a priority inheritance system.
+ * 
+ * This function implements priority donation in a chain reaction: if 'target' is waiting for a lock 
+ * held by another thread, this thread (and potentially subsequent threads in the waiting chain) 
+ * will have their priorities temporarily raised to at least the priority of 'donor'.
+ * 
+ * The donation propagates along the chain of locks that 'target' is waiting for, ensuring that 
+ * all threads holding resources needed by 'target' receive the necessary priority boost to prevent 
+ * priority inversion. The effective priority of each thread in the chain is updated to the maximum 
+ * of its current effective priority and the donor's priority.
+ * 
+ * @param target The thread that is waiting for a resource and initiates the priority donation.
+ * @param donor  The thread whose priority is used as the donation value.
+ *               The effective priority of 'target' and all threads in its waiting chain 
+ *              will be raised to at least this value.
+ */
 void thread_donate_priority(struct thread* target, struct thread* donor) {
   ASSERT(target != NULL);
   ASSERT(donor != NULL);
@@ -654,13 +671,14 @@ void thread_donate_priority(struct thread* target, struct thread* donor) {
   }
 
   while (target->waiting_lock != NULL) {
-    struct thread* next = target->waiting_lock->holder;
-    ASSERT(next != NULL);
-    ASSERT(is_thread(next));
-    if (next->effective_priority > target->effective_priority) {
-      break;
-    }
-    target = next;
+    struct thread* holder = target->waiting_lock->holder;
+    ASSERT(holder != NULL);
+    ASSERT(is_thread(holder));
+    target->effective_priority = MAX(target->effective_priority, donor->effective_priority);
+    //! IMPORTANT: Update the waiters priority of the lock ASAP.
+    target->waiting_lock->waiters_priority =
+        MAX(target->waiting_lock->waiters_priority, target->effective_priority);
+    target = holder;
   }
   target->effective_priority = MAX(target->effective_priority, donor->effective_priority);
 
