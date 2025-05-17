@@ -7,6 +7,23 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 
+/**
+ * @brief Scheduling metadata for threads under fair scheduling policy
+ * 
+ * Stores runtime metrics and scheduling parameters used by the fair scheduler
+ * to maintain proportional CPU allocation based on thread priorities.
+ * 
+ * The fair scheduler uses these fields to:
+ * 1. Track virtual runtime for each thread
+ * 2. Enforce time quantum limits
+ * 3. Implement wait-time based priority boosting
+ */
+typedef struct {
+  unsigned int vruntime;    /* Virtual runtime of the thread */
+  unsigned int time_quanta; /* Time quantum for the thread */
+  unsigned int wait_ticks;  /* Number of ticks the thread has waited */
+} Fair_scheduler_data_t;
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -104,6 +121,8 @@ struct thread {
   /* Owned by synch.c. */
   struct list held_locks;    /* List of locks held by this thread. */
   struct lock* waiting_lock; /* Lock that this thread is waiting for. */
+
+  Fair_scheduler_data_t fair_scheduler_data; /* Fair scheduler data */
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };

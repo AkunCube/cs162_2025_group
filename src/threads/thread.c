@@ -30,6 +30,8 @@ static struct list fifo_ready_list;
    managed using a priority scheduling policy. */
 static struct list prio_ready_list;
 
+static struct list fair_ready_list;
+
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
@@ -56,8 +58,10 @@ static long long kernel_ticks; /* # of timer ticks in kernel threads. */
 static long long user_ticks;   /* # of timer ticks in user programs. */
 
 /* Scheduling. */
-#define TIME_SLICE 4          /* # of timer ticks to give each thread. */
-static unsigned thread_ticks; /* # of timer ticks since last yield. */
+#define TIME_SLICE 4 /* # of timer ticks to give each thread. */
+#define MIN_LATENCY 1024
+#define MIN_QUANTA 2
+static unsigned thread_ticks; /* # of timer ticks since last scheduled. */
 
 static void init_thread(struct thread*, const char* name, int priority);
 static bool is_thread(struct thread*) UNUSED;
@@ -77,6 +81,11 @@ static struct thread* thread_schedule_prio(void);
 static struct thread* thread_schedule_fair(void);
 static struct thread* thread_schedule_mlfqs(void);
 static struct thread* thread_schedule_reserved(void);
+
+static void update_fair_scheduler_thread_metrics(void);
+static void update_fair_scheduler_time_quantums(void);
+static bool fair_scheduler_less(const struct list_elem* a, const struct list_elem* b,
+                                void* aux UNUSED);
 
 #define finit() asm("finit")
 #define fsave(state) asm volatile("fsave (%0)" : : "g"(&state))
@@ -119,6 +128,7 @@ void thread_init(void) {
   lock_init(&tid_lock);
   list_init(&fifo_ready_list);
   list_init(&prio_ready_list);
+  list_init(&fair_ready_list);
   list_init(&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -158,9 +168,15 @@ void thread_tick(void) {
   else
     kernel_ticks++;
 
-  /* Enforce preemption. */
-  if (++thread_ticks >= TIME_SLICE)
-    intr_yield_on_return();
+  switch (active_sched_policy) {
+    case SCHED_FAIR:
+      update_fair_scheduler_thread_metrics();
+      break;
+    default:
+      /* Enforce preemption. */
+      if (++thread_ticks >= TIME_SLICE)
+        intr_yield_on_return();
+  }
 }
 
 /* Prints thread statistics. */
@@ -217,11 +233,18 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sf->eip = switch_entry;
   sf->ebp = 0;
 
+  if (active_sched_policy == SCHED_FAIR) {
+    update_fair_scheduler_time_quantums();
+  }
+
   /* Add to run queue. */
   thread_unblock(t);
 
   // If the new thread has a higher priority than the current.
-  thread_yield();
+  if (priority > thread_current()->effective_priority && intr_get_level() == INTR_ON) {
+    // We need to yield.
+    thread_yield();
+  }
   return tid;
 }
 
@@ -251,6 +274,8 @@ static void thread_enqueue(struct thread* t) {
     list_push_back(&fifo_ready_list, &t->elem);
   else if (active_sched_policy == SCHED_PRIO)
     list_push_back(&prio_ready_list, &t->elem);
+  else if (active_sched_policy == SCHED_FAIR)
+    list_push_back(&fair_ready_list, &t->elem);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -465,6 +490,12 @@ static void init_thread(struct thread* t, const char* name, int priority) {
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
+
+  if (active_sched_policy == SCHED_FAIR) {
+    t->fair_scheduler_data.vruntime = 0;
+    t->fair_scheduler_data.time_quanta = 0;
+    t->fair_scheduler_data.wait_ticks = 0;
+  }
   intr_set_level(old_level);
 }
 
@@ -501,7 +532,15 @@ static struct thread* thread_schedule_prio(void) {
 
 /* Fair priority scheduler */
 static struct thread* thread_schedule_fair(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=fair\"");
+  if (!list_empty(&fair_ready_list)) {
+    // Find the max priority thread in the list
+    struct list_elem* max = list_max(&fair_ready_list, fair_scheduler_less, NULL);
+    struct thread* t = list_entry(max, struct thread, elem);
+    list_remove(max);
+    t->fair_scheduler_data.wait_ticks = 0;
+    return t;
+  } else
+    return idle_thread;
 }
 
 /* Multi-level feedback queue scheduler */
@@ -548,8 +587,9 @@ void thread_switch_tail(struct thread* prev) {
   /* Mark us as running. */
   cur->status = THREAD_RUNNING;
 
-  /* Start new time slice. */
-  thread_ticks = 0;
+  /* Don't reset thread_ticks if nothing changed. */
+  if (prev != NULL)
+    thread_ticks = 0;
 
 #ifdef USERPROG
   /* Activate the new address space. */
@@ -643,6 +683,40 @@ bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, 
 }
 
 /**
+ * @brief Compare function for fair scheduler priority ordering
+ * 
+ * Determines thread scheduling order based on dynamic priority calculation
+ * that balances base priority, accumulated wait time, and virtual runtime.
+ * 
+ * The effective priority is computed as:
+ *   dynamic_priority = base_priority + wait_ticks
+ * 
+ * This formula ensures:
+ * 1. Higher base priority threads are favored
+ * 2. Threads waiting longer are promoted to avoid starvation
+ * 3. Threads that have run more recently are demoted
+ * 
+ * @param a List element representing the first thread
+ * @param b List element representing the second thread
+ * @param UNUSED Unused auxiliary data (required by list API)
+ * @return true if thread a should be scheduled before thread b
+ * @return false otherwise
+ */
+static bool fair_scheduler_less(const struct list_elem* a, const struct list_elem* b,
+                                void* aux UNUSED) {
+  struct thread* t1 = list_entry(a, struct thread, elem);
+  struct thread* t2 = list_entry(b, struct thread, elem);
+  Fair_scheduler_data_t* fsd1 = &t1->fair_scheduler_data;
+  Fair_scheduler_data_t* fsd2 = &t2->fair_scheduler_data;
+
+  // Calculate dynamic priorities
+  int t1_priority = t1->effective_priority + fsd1->wait_ticks;
+  int t2_priority = t2->effective_priority + fsd2->wait_ticks;
+
+  return t1_priority < t2_priority;
+}
+
+/**
  * @brief Performs priority donation to resolve priority inversion issues in a priority inheritance system.
  * 
  * This function implements priority donation in a chain reaction: if 'target' is waiting for a lock 
@@ -709,4 +783,93 @@ void thread_update_effective_priority(struct thread* t) {
     max_priority = l->waiters_priority;
   }
   t->effective_priority = MAX(max_priority, t->priority);
+}
+
+/**
+ * @brief Recalculate and update time quanta for all threads under fair scheduling policy
+ * 
+ * This function computes the time slice allocation for each thread based on their 
+ * priority weights when using the SCHED_FAIR scheduling algorithm. 
+ * 
+ * The time quantum for each thread is determined by:
+ *   1. Calculating its priority proportion relative to the total priority of all threads
+ *   2. Applying this proportion to the MIN_LATENCY period
+ *   3. Ensuring the result meets the minimum time quantum requirement (MIN_QUANTA)
+ * 
+ * This approach ensures higher priority threads receive larger time slices 
+ * while maintaining fairness across the system. The calculation is performed 
+ * atomically with interrupts disabled to prevent race conditions.
+ * 
+ * Preconditions:
+ * - Current scheduling policy must be SCHED_FAIR
+ * - Interrupts should be manageable (will be disabled temporarily)
+ */
+static void update_fair_scheduler_time_quantums(void) {
+  ASSERT(active_sched_policy == SCHED_FAIR);
+  enum intr_level old_level = intr_disable();
+  int total_priority = 0;
+
+  // Step 1: Aggregate total priority across all threads.
+  for (struct list_elem* e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+    struct thread* t = list_entry(e, struct thread, allelem);
+    total_priority += t->priority;
+  }
+
+  // Step 2: Calculate and assign time quanta based on priority ratios.
+  for (struct list_elem* e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+    struct thread* t = list_entry(e, struct thread, allelem);
+    float proportion = ((float)t->priority) / ((float)total_priority);
+    t->fair_scheduler_data.time_quanta = MAX(MIN_QUANTA, MIN_LATENCY * proportion);
+  }
+
+  intr_set_level(old_level);
+}
+
+/**
+ * @brief Update fair scheduler metrics and manage time quantum for the current thread
+ * 
+ * This function performs per-tick accounting for the fair scheduling algorithm:
+ * 1. Increments the current thread's virtual runtime
+ * 2. Updates wait ticks for all ready-to-run threads except the current one
+ * 3. Checks if the current thread has exhausted its time quantum
+ * 4. Recalculates and resets the time quantum if exhausted.
+ * 
+ * The time quantum is dynamically adjusted based on the thread's priority relative
+ * to the total system priority, ensuring fairness while maintaining responsiveness.
+ * 
+ * Preconditions:
+ * - Current scheduling policy must be SCHED_FAIR
+ * - Function should be called once per timer tick
+ */
+static void update_fair_scheduler_thread_metrics(void) {
+  ASSERT(active_sched_policy == SCHED_FAIR);
+  struct thread* cur = thread_current();
+
+  // Update current thread's virtual runtime
+  Fair_scheduler_data_t* fsd = &cur->fair_scheduler_data;
+  ++fsd->vruntime;
+
+  // Track wait time for other ready threads
+  for (struct list_elem* e = list_begin(&fair_ready_list); e != list_end(&fair_ready_list);
+       e = list_next(e)) {
+    struct thread* t = list_entry(e, struct thread, elem);
+    Fair_scheduler_data_t* fsd = &t->fair_scheduler_data;
+    if (t != cur) {
+      ++fsd->wait_ticks;
+    }
+  }
+
+  // Check time quantum expiration and trigger rescheduling if needed
+  if (++thread_ticks >= fsd->time_quanta) {
+    intr_yield_on_return();
+
+    // Recalculate time quantum based on priority weights
+    int total_priority = 0;
+    for (struct list_elem* e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+      struct thread* t = list_entry(e, struct thread, allelem);
+      total_priority += t->priority;
+    }
+    float proportion = ((float)cur->priority) / ((float)total_priority);
+    fsd->time_quanta = MAX(MIN_QUANTA, MIN_LATENCY * proportion);
+  }
 }

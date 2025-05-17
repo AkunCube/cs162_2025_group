@@ -114,6 +114,7 @@ void sema_up(struct semaphore* sema) {
   enum intr_level old_level;
 
   ASSERT(sema != NULL);
+  bool should_yield = false;
 
   old_level = intr_disable();
   if (!list_empty(&sema->waiters)) {
@@ -121,13 +122,14 @@ void sema_up(struct semaphore* sema) {
     struct list_elem* max_elem = list_max(&sema->waiters, thread_priority_less, NULL);
     struct thread* t = list_entry(max_elem, struct thread, elem);
     list_remove(max_elem);
+    should_yield = t->effective_priority > thread_current()->effective_priority;
     thread_unblock(t);
   }
   sema->value++;
   intr_set_level(old_level);
 
   //! IMPORTANT: We don't want to yield if we are in an interrupt context.
-  if (intr_get_level() == INTR_ON) {
+  if (intr_get_level() == INTR_ON && should_yield) {
     thread_yield();
   }
 }
