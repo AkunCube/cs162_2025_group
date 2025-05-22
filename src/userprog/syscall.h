@@ -20,5 +20,8 @@ uint32_t sys_seek(uint32_t*);
 uint32_t sys_remove(uint32_t*);
 uint32_t sys_compute_e(uint32_t*);
 uint32_t sys_lock_init(uint32_t*);
+uint32_t sys_pthread_create(uint32_t*);
+uint32_t sys_pthread_join(uint32_t*);
+uint32_t sys_pthread_exit(uint32_t*);
 
 #endif /* userprog/syscall.h */

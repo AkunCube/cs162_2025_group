@@ -29,12 +29,25 @@ void syscall_init(void) {
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,         [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,           [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create,       [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,           [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,           [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_WRITE] = sys_write,
+    [SYS_PRACTICE] = sys_practice,
+    [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,
+    [SYS_EXIT] = sys_exit,
+    [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,
+    [SYS_OPEN] = sys_open,
+    [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,
+    [SYS_CLOSE] = sys_close,
+    [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek,
+    [SYS_REMOVE] = sys_remove,
+    [SYS_COMPUTE_E] = sys_compute_e,
     [SYS_LOCK_INIT] = sys_lock_init,
+    [SYS_PT_CREATE] = sys_pthread_create,
+    [SYS_PT_JOIN] = sys_pthread_join,
+    [SYS_PT_EXIT] = sys_pthread_exit,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -59,6 +72,7 @@ static void syscall_handler(struct intr_frame* f) {
     return_value = process_fork(f);
   } else {
     // Passing the real arguments to the syscall function.
+    ASSERT(syscalls[syscall_num] != NULL); //* For debugging purposes.
     return_value = syscalls[syscall_num](&args[1]);
   }
 
@@ -282,6 +296,24 @@ uint32_t sys_lock_init(uint32_t* args) {
   return true;
 }
 
+uint32_t sys_pthread_create(uint32_t* args) {
+  validate_buffer_in_user_region(args, 3 * sizeof(uint32_t));
+  stub_fun sfun = (stub_fun)args[0];
+  pthread_fun tfun = (pthread_fun)args[1];
+  const void* arg = (const void*)args[2];
+  return pthread_execute(sfun, tfun, arg);
+}
+
+uint32_t sys_pthread_join(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  tid_t tid = (tid_t)args[0];
+  return pthread_join(tid);
+}
+
+uint32_t sys_pthread_exit(uint32_t* args UNUSED) {
+  pthread_exit();
+  NOT_REACHED();
+}
 /********************************************************/
 /* HELPER FUNCTIONS */
 

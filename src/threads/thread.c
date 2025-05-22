@@ -487,6 +487,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
   list_init(&t->held_locks);
+  list_init(&t->user_stack);
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);

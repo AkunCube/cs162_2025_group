@@ -21,6 +21,52 @@ typedef void (*stub_fun)(pthread_fun, void*);
 
 #define MAX_OPEN_FILE 128
 
+/**
+ * @brief Manages the thread collection for a process.
+ * 
+ * This structure maintains the list of all threads belonging to a process.
+ * It includes an internal lock to ensure thread-safe operations when
+ * modifying the thread list (e.g., adding/removing threads).
+ * 
+ * Key features:
+ * - Thread safety through internal locking mechanism
+ * - Linked list implementation for dynamic thread management
+ */
+typedef struct {
+  struct lock lock;    /* Protects the list of threads */
+  struct list threads; /* List of threads in this process */
+} Thread_list;
+
+/**
+ * @brief Represents a thread stack allocation within the kernel.
+ * 
+ * This structure tracks the memory boundaries and list linkage of a 
+ * contiguous stack page region. Each Stack_slot corresponds to a 
+ * virtual stack allocation used by a thread during execution.
+ * 
+ * @note The stack grows downward from stackpg_top to stackpg_bottom.
+ */
+typedef struct {
+  void* stackpg_top;     /* Top of the stack page (highest address) */
+  void* stackpg_bottom;  /* Bottom of the stack page (lowest address) */
+  struct list_elem elem; /* List element for linking stack slots */
+} Stack_slot;
+
+/**
+ * @brief Manages the allocation and deallocation of thread stacks.
+ * 
+ * This structure centralizes the management of user stack pages. It 
+ * maintains a pool of free stack slots using a linked list, ensuring 
+ * efficient allocation and reuse of stack memory. The stack manager 
+ * handles contiguous memory regions and protects shared state with a lock.
+ */
+typedef struct {
+  struct lock lock;        /* Protects the Stack_manager */
+  struct list free_stacks; /* List of free stack slots */
+  void* stack_base;        /* Base address of the stack region */
+  int alloc_pgcnt;         /* Number of stack pages allocated */
+} Stack_manager;
+
 typedef struct {
   /* Child pid, parent process used to search child */
   pid_t pid;
@@ -54,6 +100,8 @@ struct process {
   struct file* elf_file;             /* Current executable file */
   Wait_status* wait_status;          /* Current process wait status, shared with its parent */
   struct list children;              /* Current process spawnning children */
+  Thread_list threads;               /* List of threads in this process */
+  Stack_manager stack_manager;       /* Stack manager for this process */
 };
 
 void userprog_init(void);
@@ -67,7 +115,7 @@ pid_t process_fork(const struct intr_frame* if_);
 bool is_main_thread(struct thread*, struct process*);
 pid_t get_pid(struct process*);
 
-tid_t pthread_execute(stub_fun, pthread_fun, void*);
+tid_t pthread_execute(stub_fun, pthread_fun, const void*);
 tid_t pthread_join(tid_t);
 void pthread_exit(void);
 void pthread_exit_main(void);
