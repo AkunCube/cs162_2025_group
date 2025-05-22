@@ -14,6 +14,7 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #include "debug.h"
 #include <float.h>
 
@@ -21,11 +22,15 @@ static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
 static struct file* validate_file_descriptor(int fd);
+static struct lock* validate_lock_descriptor(char* lock);
 static int fd_alloc(struct process* pcb);
+static int allocate_user_lock(struct process* pcb);
 static struct lock fileop_lock;
+static struct lock alloc_sync_lock;
 void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
   lock_init(&fileop_lock);
+  lock_init(&alloc_sync_lock);
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
@@ -45,6 +50,8 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_REMOVE] = sys_remove,
     [SYS_COMPUTE_E] = sys_compute_e,
     [SYS_LOCK_INIT] = sys_lock_init,
+    [SYS_LOCK_ACQUIRE] = sys_lock_acquire,
+    [SYS_LOCK_RELEASE] = sys_lock_release,
     [SYS_PT_CREATE] = sys_pthread_create,
     [SYS_PT_JOIN] = sys_pthread_join,
     [SYS_PT_EXIT] = sys_pthread_exit,
@@ -288,11 +295,38 @@ uint32_t sys_compute_e(uint32_t* args) {
 
 uint32_t sys_lock_init(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
-  struct lock* lock = (struct lock*)args[0];
-  if (lock == NULL) {
+  char* lock = (char*)args[0];
+
+  if (lock == NULL)
     return false;
-  }
-  lock_init(lock);
+
+  int lock_id = allocate_user_lock(thread_current()->pcb);
+  if (lock_id == -1)
+    return false;
+
+  *lock = lock_id;
+  return true;
+}
+
+uint32_t sys_lock_acquire(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  char* lock = (char*)args[0];
+  struct lock* user_lock = validate_lock_descriptor(lock);
+  if (user_lock == NULL)
+    return false;
+
+  lock_acquire(user_lock);
+  return true;
+}
+
+uint32_t sys_lock_release(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  char* lock = (char*)args[0];
+  struct lock* user_lock = validate_lock_descriptor(lock);
+  if (user_lock == NULL)
+    return false;
+
+  lock_release(user_lock);
   return true;
 }
 
@@ -380,6 +414,44 @@ static int fd_alloc(struct process* pcb) {
 }
 
 /**
+ * Allocates and initializes a new user lock for the given process.
+ * 
+ * Searches for the first available slot in the process's user_locks array,
+ * allocates a new lock structure, initializes it, and returns the index
+ * of the allocated slot. Returns -1 if no slots are available or memory allocation fails.
+ * 
+ * @param pcb Pointer to the process control block
+ * @return Index of the allocated lock on success, -1 on failure
+ */
+static int allocate_user_lock(struct process* pcb) {
+  if (pcb == NULL)
+    return -1;
+
+  int idx = -1;
+  lock_acquire(&alloc_sync_lock);
+
+  for (int i = 0; i < MAX_SYNC; i++) {
+    if (pcb->user_locks[i] == NULL) {
+      idx = i;
+      break;
+    }
+  }
+
+  if (idx != -1) {
+    struct lock* user_lock = (struct lock*)malloc(sizeof(struct lock));
+    if (user_lock == NULL) {
+      lock_release(&alloc_sync_lock);
+      return -1;
+    }
+    lock_init(user_lock);
+    pcb->user_locks[idx] = user_lock;
+  }
+
+  lock_release(&alloc_sync_lock);
+  return idx;
+}
+
+/**
  * @brief Validate the file descriptor.
  * 
  * @param fd 
@@ -391,4 +463,23 @@ static struct file* validate_file_descriptor(int fd) {
   }
 
   return thread_current()->pcb->ofile[fd];
+}
+
+/**
+ * @brief Validate the lock descriptor.
+ * 
+ * @param lock_id 
+ * @return struct lock* Return the lock pointer if valid, otherwise NULL.
+ */
+static struct lock* validate_lock_descriptor(char* lock) {
+  if (lock == NULL)
+    return NULL;
+  int lock_id = *lock;
+  if (lock_id < 0 || lock_id >= MAX_SYNC)
+    return NULL;
+
+  struct process* pcb = thread_current()->pcb;
+  if (pcb == NULL || pcb->user_locks[lock_id] == NULL)
+    return NULL;
+  return pcb->user_locks[lock_id];
 }

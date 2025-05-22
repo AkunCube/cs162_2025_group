@@ -20,6 +20,7 @@ typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
 #define MAX_OPEN_FILE 128
+#define MAX_SYNC 128
 
 /**
  * @brief Manages the thread collection for a process.
@@ -102,6 +103,8 @@ struct process {
   struct list children;              /* Current process spawnning children */
   Thread_list threads;               /* List of threads in this process */
   Stack_manager stack_manager;       /* Stack manager for this process */
+  struct lock* user_locks[MAX_SYNC]; /* User locks for this process */
+  struct semaphore* user_semaphores[MAX_SYNC]; /* User semaphores for this process */
 };
 
 void userprog_init(void);
