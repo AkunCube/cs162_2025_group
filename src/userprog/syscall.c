@@ -561,14 +561,11 @@ static struct file* validate_file_descriptor(int fd) {
  * @return struct lock* Return the lock pointer if valid, otherwise NULL.
  */
 static struct lock* validate_lock_descriptor(char* lock) {
+  struct process* pcb = thread_current()->pcb;
   if (lock == NULL)
     return NULL;
   int lock_id = *lock;
-  if (lock_id < 0 || lock_id >= MAX_SYNC)
-    return NULL;
-
-  struct process* pcb = thread_current()->pcb;
-  if (pcb == NULL || pcb->user_locks[lock_id] == NULL)
+  if (lock_id < 0 || lock_id >= MAX_SYNC || pcb == NULL)
     return NULL;
   return pcb->user_locks[lock_id];
 }
@@ -580,14 +577,11 @@ static struct lock* validate_lock_descriptor(char* lock) {
  * @return struct semaphore* Return the semaphore pointer if valid, otherwise NULL.
  */
 static struct semaphore* validate_sema_descriptor(char* sema) {
+  struct process* pcb = thread_current()->pcb;
   if (sema == NULL)
     return NULL;
   int sema_id = *sema;
-  if (sema_id < 0 || sema_id >= MAX_SYNC)
-    return NULL;
-
-  struct process* pcb = thread_current()->pcb;
-  if (pcb == NULL || pcb->user_semaphores[sema_id] == NULL)
+  if (sema_id < 0 || sema_id >= MAX_SYNC || pcb == NULL)
     return NULL;
   return pcb->user_semaphores[sema_id];
 }
