@@ -50,6 +50,7 @@ typedef struct {
 typedef struct {
   void* stackpg_top;     /* Top of the stack page (highest address) */
   void* stackpg_bottom;  /* Bottom of the stack page (lowest address) */
+  bool is_mapped;        /* Indicates if the stack page is mapped */
   struct list_elem elem; /* List element for linking stack slots */
 } Stack_slot;
 

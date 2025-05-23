@@ -140,6 +140,7 @@ static void init_stack_manager(Stack_manager* sm) {
     }
     ss->stackpg_top = PHYS_BASE - i * PGSIZE;
     ss->stackpg_bottom = PHYS_BASE - (i + 1) * PGSIZE;
+    ss->is_mapped = false;
     list_push_back(&sm->free_stacks, &ss->elem);
     ++sm->alloc_pgcnt;
   }
@@ -181,6 +182,7 @@ static bool expand_stack_pool(Stack_manager* sm, int increment) {
     }
     ss->stackpg_top = stack_base - i * PGSIZE;
     ss->stackpg_bottom = stack_base - (i + 1) * PGSIZE;
+    ss->is_mapped = false;
     list_push_back(&sm->free_stacks, &ss->elem);
     ++sm->alloc_pgcnt;
   }
@@ -831,24 +833,33 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool setup_stack(void** esp) {
-  uint8_t* kpage;
-  bool success = false;
 
   Stack_slot* ss = process_allocate_stack(&thread_current()->pcb->stack_manager);
   if (ss == NULL) {
     return false;
   }
 
-  kpage = palloc_get_page(PAL_USER | PAL_ZERO);
-  if (kpage != NULL) {
-    success = install_page(ss->stackpg_bottom, kpage, true);
-    if (success) {
-      *esp = ss->stackpg_top;
-      list_push_back(&thread_current()->user_stack, &ss->elem);
-    } else
-      palloc_free_page(kpage);
+  if (ss->is_mapped) {
+    // Stack already mapped, no need to allocate a new one.
+    *esp = ss->stackpg_top;
+    list_push_back(&thread_current()->user_stack, &ss->elem);
+    return true;
   }
-  return success;
+
+  uint8_t* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+  if (kpage == NULL)
+    return false;
+
+  bool success = install_page(ss->stackpg_bottom, kpage, true);
+  if (!success) {
+    palloc_free_page(kpage);
+    return false;
+  }
+
+  *esp = ss->stackpg_top;
+  ss->is_mapped = true;
+  list_push_back(&thread_current()->user_stack, &ss->elem);
+  return true;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
@@ -894,25 +905,32 @@ bool setup_thread(void** esp, Join_status* js) {
   }
 
   Thread_list* threads = &t->pcb->threads;
-
   lock_acquire(&threads->lock);
   list_push_back(&threads->threads, &js->elem);
   lock_release(&threads->lock);
 
-  uint8_t* kpage;
-  bool success = false;
-
-  kpage = palloc_get_page(PAL_USER | PAL_ZERO);
-  if (kpage != NULL) {
-    success = install_page(ss->stackpg_bottom, kpage, true);
-    if (success) {
-      *esp = ss->stackpg_top;
-      list_push_back(&thread_current()->user_stack, &ss->elem);
-    } else
-      palloc_free_page(kpage);
+  if (ss->is_mapped) {
+    // Stack already mapped, no need to allocate a new one.
+    *esp = ss->stackpg_top;
+    list_push_back(&t->user_stack, &ss->elem);
+    return true;
   }
 
-  return success;
+  uint8_t* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+  if (kpage == NULL) {
+    return false;
+  }
+
+  bool success = install_page(ss->stackpg_bottom, kpage, true);
+  if (!success) {
+    palloc_free_page(kpage);
+    return false;
+  }
+
+  *esp = ss->stackpg_top;
+  ss->is_mapped = true;
+  list_push_back(&t->user_stack, &ss->elem);
+  return true;
 }
 
 /* Starts a new thread with a new user stack running SF, which takes
