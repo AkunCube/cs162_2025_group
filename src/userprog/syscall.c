@@ -23,8 +23,10 @@ static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
 static struct file* validate_file_descriptor(int fd);
 static struct lock* validate_lock_descriptor(char* lock);
+static struct semaphore* validate_sema_descriptor(char* sema);
 static int fd_alloc(struct process* pcb);
 static int allocate_user_lock(struct process* pcb);
+static int allocate_user_sema(struct process* pcb, unsigned int value);
 static struct lock fileop_lock;
 static struct lock alloc_sync_lock;
 void syscall_init(void) {
@@ -55,6 +57,9 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_PT_CREATE] = sys_pthread_create,
     [SYS_PT_JOIN] = sys_pthread_join,
     [SYS_PT_EXIT] = sys_pthread_exit,
+    [SYS_SEMA_INIT] = sys_sema_init,
+    [SYS_SEMA_UP] = sys_sema_up,
+    [SYS_SEMA_DOWN] = sys_sema_down,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -354,6 +359,44 @@ uint32_t sys_pthread_exit(uint32_t* args UNUSED) {
   pthread_exit();
   NOT_REACHED();
 }
+
+uint32_t sys_sema_init(uint32_t* args) {
+  validate_buffer_in_user_region(args, 2 * sizeof(uint32_t));
+  char* sema = (char*)args[0];
+  int val = (int)args[1];
+
+  if (sema == NULL || val < 0)
+    return false;
+  int sema_id = allocate_user_sema(thread_current()->pcb, (unsigned int)val);
+  if (sema_id == -1)
+    return false;
+
+  *sema = sema_id;
+  return true;
+}
+
+uint32_t sys_sema_up(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  char* sema = (char*)args[0];
+  struct semaphore* user_sema = validate_sema_descriptor(sema);
+  if (user_sema == NULL)
+    return false;
+
+  sema_up(user_sema);
+  return true;
+}
+
+uint32_t sys_sema_down(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  char* sema = (char*)args[0];
+  struct semaphore* user_sema = validate_sema_descriptor(sema);
+  if (user_sema == NULL)
+    return false;
+
+  sema_down(user_sema);
+  return true;
+}
+
 /********************************************************/
 /* HELPER FUNCTIONS */
 
@@ -458,6 +501,46 @@ static int allocate_user_lock(struct process* pcb) {
 }
 
 /**
+ * @brief Allocates and initializes a new user semaphore for a process.
+ * 
+ * Searches for an available slot in the process's semaphore table,
+ * allocates a new semaphore structure, initializes it with the specified
+ * value, and returns the index of the allocated slot. Returns -1 on failure.
+ * 
+ * @param pcb   Pointer to the process control block
+ * @param value Initial value for the semaphore
+ * @return Index of the allocated semaphore slot (0 to MAX_SYNC-1),
+ *         or -1 if the table is full or memory allocation fails
+ */
+static int allocate_user_sema(struct process* pcb, unsigned int value) {
+  if (pcb == NULL)
+    return -1;
+
+  int idx = -1;
+  lock_acquire(&alloc_sync_lock);
+
+  for (int i = 0; i < MAX_SYNC; i++) {
+    if (pcb->user_semaphores[i] == NULL) {
+      idx = i;
+      break;
+    }
+  }
+
+  if (idx != -1) {
+    struct semaphore* user_sema = (struct semaphore*)malloc(sizeof(struct semaphore));
+    if (user_sema == NULL) {
+      lock_release(&alloc_sync_lock);
+      return -1;
+    }
+    sema_init(user_sema, value);
+    pcb->user_semaphores[idx] = user_sema;
+  }
+
+  lock_release(&alloc_sync_lock);
+  return idx;
+}
+
+/**
  * @brief Validate the file descriptor.
  * 
  * @param fd 
@@ -488,4 +571,23 @@ static struct lock* validate_lock_descriptor(char* lock) {
   if (pcb == NULL || pcb->user_locks[lock_id] == NULL)
     return NULL;
   return pcb->user_locks[lock_id];
+}
+
+/**
+ * @brief Validate the semaphore descriptor.
+ * 
+ * @param lock 
+ * @return struct semaphore* Return the semaphore pointer if valid, otherwise NULL.
+ */
+static struct semaphore* validate_sema_descriptor(char* sema) {
+  if (sema == NULL)
+    return NULL;
+  int sema_id = *sema;
+  if (sema_id < 0 || sema_id >= MAX_SYNC)
+    return NULL;
+
+  struct process* pcb = thread_current()->pcb;
+  if (pcb == NULL || pcb->user_semaphores[sema_id] == NULL)
+    return NULL;
+  return pcb->user_semaphores[sema_id];
 }

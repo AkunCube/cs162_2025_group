@@ -25,5 +25,8 @@ uint32_t sys_pthread_join(uint32_t*);
 uint32_t sys_pthread_exit(uint32_t*);
 uint32_t sys_lock_acquire(uint32_t*);
 uint32_t sys_lock_release(uint32_t*);
+uint32_t sys_sema_init(uint32_t*);
+uint32_t sys_sema_up(uint32_t*);
+uint32_t sys_sema_down(uint32_t*);
 
 #endif /* userprog/syscall.h */
