@@ -315,6 +315,9 @@ uint32_t sys_lock_acquire(uint32_t* args) {
   if (user_lock == NULL)
     return false;
 
+  if (lock_held_by_current_thread(user_lock))
+    return false;
+
   lock_acquire(user_lock);
   return true;
 }
@@ -324,6 +327,9 @@ uint32_t sys_lock_release(uint32_t* args) {
   char* lock = (char*)args[0];
   struct lock* user_lock = validate_lock_descriptor(lock);
   if (user_lock == NULL)
+    return false;
+
+  if (!lock_held_by_current_thread(user_lock))
     return false;
 
   lock_release(user_lock);
