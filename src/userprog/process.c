@@ -37,6 +37,7 @@ static bool expand_stack_pool(Stack_manager* sm, int new_size);
 static Stack_slot* process_allocate_stack(Stack_manager* sm);
 static void perform_fork_operations(void* args);
 static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
+static void init_process_descriptors(struct process* pcb);
 
 #define ALIGN_MASK(type) (~(sizeof(type) - 1))
 
@@ -216,6 +217,30 @@ static Stack_slot* process_allocate_stack(Stack_manager* sm) {
   return slot;
 }
 
+/**
+ * @brief Initializes all descriptor tables for a new process.
+ * 
+ * Sets up the process's file descriptors, synchronization primitives,
+ * and ELF file pointer to their initial states (NULL). This ensures the
+ * process starts with a clean slate for resource management.
+ * 
+ * @param pcb Pointer to the process control block to initialize
+ */
+static void init_process_descriptors(struct process* pcb) {
+  pcb->elf_file = NULL;
+
+  // Initialize file descriptor table
+  for (int i = 0; i < MAX_OPEN_FILE; ++i) {
+    pcb->ofile[i] = NULL;
+  }
+
+  // Initialize synchronization primitives
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    pcb->user_locks[i] = NULL;
+    pcb->user_semaphores[i] = NULL;
+  }
+}
+
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
@@ -333,11 +358,7 @@ static void start_process(void* sargs) {
     list_init(&t->pcb->children);
     init_threads_list(&t->pcb->threads);
     init_stack_manager(&t->pcb->stack_manager);
-    // Clear the user open files.
-    for (int i = 0; i < MAX_OPEN_FILE; ++i) {
-      t->pcb->ofile[i] = NULL;
-    }
-    t->pcb->elf_file = NULL;
+    init_process_descriptors(t->pcb);
   }
 
   /* Make a new wait_status and insert it to parent's children list. */
@@ -1233,6 +1254,7 @@ static void perform_fork_operations(void* args) {
 
     t->pcb->elf_file = share_file(parent->elf_file);
     file_deny_write(t->pcb->elf_file);
+    // TODO: Copy lock and semaphore objects if needed.
   }
 
   // Copy the page directory.
