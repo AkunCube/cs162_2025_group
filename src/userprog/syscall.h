@@ -28,5 +28,6 @@ uint32_t sys_lock_release(uint32_t*);
 uint32_t sys_sema_init(uint32_t*);
 uint32_t sys_sema_up(uint32_t*);
 uint32_t sys_sema_down(uint32_t*);
+uint32_t sys_get_tid(uint32_t*);
 
 #endif /* userprog/syscall.h */

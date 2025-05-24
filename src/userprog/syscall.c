@@ -60,6 +60,7 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_SEMA_INIT] = sys_sema_init,
     [SYS_SEMA_UP] = sys_sema_up,
     [SYS_SEMA_DOWN] = sys_sema_down,
+    [SYS_GET_TID] = sys_get_tid,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -395,6 +396,11 @@ uint32_t sys_sema_down(uint32_t* args) {
 
   sema_down(user_sema);
   return true;
+}
+
+uint32_t sys_get_tid(uint32_t* args UNUSED) {
+  // Return the current thread's TID.
+  return thread_current()->tid;
 }
 
 /********************************************************/
