@@ -38,6 +38,7 @@ static Stack_slot* process_allocate_stack(Stack_manager* sm);
 static void perform_fork_operations(void* args);
 static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
 static void init_process_descriptors(struct process* pcb);
+static void release_user_stack(struct thread* t);
 
 #define ALIGN_MASK(type) (~(sizeof(type) - 1))
 
@@ -1096,14 +1097,7 @@ void pthread_exit(void) {
   ASSERT(pcb != NULL);
 
   // Release the thread's stack.
-  ASSERT(list_size(&cur->user_stack) > 0);
-  for (struct list_elem* e = list_begin(&cur->user_stack); e != list_end(&cur->user_stack);) {
-    Stack_slot* ss = list_entry(e, Stack_slot, elem);
-    e = list_remove(e);
-    lock_acquire(&pcb->stack_manager.lock);
-    list_push_front(&pcb->stack_manager.free_stacks, &ss->elem);
-    lock_release(&pcb->stack_manager.lock);
-  }
+  release_user_stack(cur);
 
   // Wake up any waiters on this thread after we release the stack.
   sema_up(&cur->join_status->dead);
@@ -1121,7 +1115,56 @@ void pthread_exit(void) {
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-void pthread_exit_main(void) {}
+void pthread_exit_main(void) {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  int cur_tid = cur->tid;
+  ASSERT(pcb != NULL);
+
+  // Release the thread's user stack.
+  release_user_stack(cur);
+
+  // Wake up any waiters on this thread after we release the stack.
+  sema_up(&cur->join_status->dead);
+
+  cur->join_status = NULL;
+
+  // Wait for all remaining threads in the process to terminate.
+  Thread_list* thread_list = &pcb->threads;
+
+  lock_acquire(&thread_list->lock);
+  for (struct list_elem* e = list_begin(&thread_list->threads);
+       e != list_end(&thread_list->threads);) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    lock_release(&thread_list->lock);
+    if (js->tid == cur_tid) {
+      // Skip the current thread, as it is the main thread.
+      e = list_next(e);
+    } else {
+      sema_down(&js->dead);
+      e = list_remove(e);
+      free(js);
+    }
+    lock_acquire(&thread_list->lock);
+  }
+  lock_release(&thread_list->lock);
+
+  // Now that all threads have terminated, but maybe some thread doesn't join main,
+  // so we need to clean up our Join_status.
+  lock_acquire(&thread_list->lock);
+  size_t length = list_size(&thread_list->threads);
+  ASSERT(length == 0 || length == 1);
+  if (length == 1) {
+    // The main thread is the only thread left, so we can free the Join_status.
+    Join_status* js = list_entry(list_front(&thread_list->threads), Join_status, elem);
+    ASSERT(js->tid == cur_tid);
+    list_remove(&js->elem);
+    free(js);
+  }
+  lock_release(&thread_list->lock);
+
+  thread_terminate(0);
+}
 
 static void handle_exit_wait_status(struct thread* cur, int exit_code) {
   // Iterate through the list of children and free resources if needed.
@@ -1211,6 +1254,29 @@ static void handle_exit_close_files(struct thread* cur) {
   if (cur->pcb->elf_file != NULL) {
     file_close(cur->pcb->elf_file);
     cur->pcb->elf_file = NULL;
+  }
+}
+
+/**
+ * @brief Releases all user stacks allocated to a thread and returns them to the pool.
+ * 
+ * Transfers ownership of all stack slots associated with the given thread back to the 
+ * process's stack manager. This ensures the stack memory can be reused by other threads.
+ * 
+ * @param t Pointer to the thread whose stacks should be released
+ */
+static void release_user_stack(struct thread* t) {
+  struct process* pcb = t->pcb;
+  ASSERT(pcb != NULL);
+
+  // Release the thread's user stack.
+  ASSERT(list_size(&t->user_stack) > 0);
+  for (struct list_elem* e = list_begin(&t->user_stack); e != list_end(&t->user_stack);) {
+    Stack_slot* ss = list_entry(e, Stack_slot, elem);
+    e = list_remove(e);
+    lock_acquire(&t->pcb->stack_manager.lock);
+    list_push_front(&t->pcb->stack_manager.free_stacks, &ss->elem);
+    lock_release(&t->pcb->stack_manager.lock);
   }
 }
 

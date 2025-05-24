@@ -357,7 +357,14 @@ uint32_t sys_pthread_join(uint32_t* args) {
 }
 
 uint32_t sys_pthread_exit(uint32_t* args UNUSED) {
-  pthread_exit();
+  struct process* pcb = thread_current()->pcb;
+  ASSERT(pcb != NULL);
+  if (is_main_thread(thread_current(), pcb)) {
+    pthread_exit_main();
+  } else {
+    // If this is not the main thread, we can exit the thread.
+    pthread_exit();
+  }
   NOT_REACHED();
 }
 
