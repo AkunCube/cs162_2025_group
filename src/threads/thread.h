@@ -7,6 +7,23 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 
+/**
+ * @brief Scheduling metadata for threads under fair scheduling policy
+ * 
+ * Stores runtime metrics and scheduling parameters used by the fair scheduler
+ * to maintain proportional CPU allocation based on thread priorities.
+ * 
+ * The fair scheduler uses these fields to:
+ * 1. Track virtual runtime for each thread
+ * 2. Enforce time quantum limits
+ * 3. Implement wait-time based priority boosting
+ */
+typedef struct {
+  unsigned int vruntime;    /* Virtual runtime of the thread */
+  unsigned int time_quanta; /* Time quantum for the thread */
+  unsigned int wait_ticks;  /* Number of ticks the thread has waited */
+} Fair_scheduler_data_t;
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -24,6 +41,19 @@ typedef int tid_t;
 #define PRI_MIN 0      /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
+
+struct thread;
+
+/* Thread join status. This structure is used to keep track of
+   the threads that are waiting for a specific thread to finish
+   execution. It contains the thread ID of the target thread and
+   a semaphore to signal when the target thread has finished. */
+typedef struct {
+  struct thread* target; /* Pointer to target thread. target->tid == tid */
+  tid_t tid;             /* Thread ID of the target thread. */
+  struct semaphore dead; /* Semaphore to signal when the target thread has finished. */
+  struct list_elem elem; /* List element for linking join statuses. */
+} Join_status;
 
 /* A kernel thread or user process.
 
@@ -87,7 +117,7 @@ struct thread {
   enum thread_status status; /* Thread state. */
   char name[16];             /* Name (for debugging purposes). */
   uint8_t* stack;            /* Saved stack pointer. */
-  int priority;              /* Priority. */
+  int priority;              /* Base priority. */
   struct list_elem allelem;  /* List element for all threads list. */
 
   /* Shared between thread.c and synch.c. */
@@ -95,9 +125,20 @@ struct thread {
 
 #ifdef USERPROG
   /* Owned by process.c. */
-  struct process* pcb; /* Process control block if this thread is a userprog */
+  struct process* pcb;      /* Process control block if this thread is a userprog */
+  Join_status* join_status; /* Join status for this thread */
+  struct list user_stack;   /* User stack for this thread */
+  bool force_exit;          /* If true, the thread will exit immediately */
 #endif
 
+  int64_t sleep_ticks;    /* Number of ticks to sleep */
+  int effective_priority; /* Effective priority */
+
+  /* Owned by synch.c. */
+  struct list held_locks;    /* List of locks held by this thread. */
+  struct lock* waiting_lock; /* Lock that this thread is waiting for. */
+
+  Fair_scheduler_data_t fair_scheduler_data; /* Fair scheduler data */
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };
@@ -148,6 +189,8 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
-void thread_terminate(int exit_code);
+bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED);
+void thread_donate_priority(struct thread* target, struct thread* donor);
+void thread_update_effective_priority(struct thread* t);
 
 #endif /* threads/thread.h */

@@ -32,6 +32,11 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+static bool cond_signal_less_func(const struct list_elem* a, const struct list_elem* b,
+                                  void* aux UNUSED);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -46,6 +51,7 @@ void sema_init(struct semaphore* sema, unsigned value) {
 
   sema->value = value;
   list_init(&sema->waiters);
+  sema->lock = NULL;
 }
 
 /* Down or "P" operation on a semaphore.  Waits for SEMA's value
@@ -63,10 +69,18 @@ void sema_down(struct semaphore* sema) {
 
   old_level = intr_disable();
   while (sema->value == 0) {
+    // If this semaphore is associated with a lock, we need to update the waiters priority
+    // inorder to support priority donation.
+    if (sema->lock != NULL) {
+      thread_current()->waiting_lock = sema->lock;
+      sema->lock->waiters_priority =
+          MAX(sema->lock->waiters_priority, thread_current()->effective_priority);
+    }
     list_push_back(&sema->waiters, &thread_current()->elem);
     thread_block();
   }
   sema->value--;
+  //! We leave the lock acquire function to update the waiters priority.
   intr_set_level(old_level);
 }
 
@@ -100,12 +114,24 @@ void sema_up(struct semaphore* sema) {
   enum intr_level old_level;
 
   ASSERT(sema != NULL);
+  bool should_yield = false;
 
   old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
-    thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+  if (!list_empty(&sema->waiters)) {
+    // Find the thread with the highest priority in the waiters list.
+    struct list_elem* max_elem = list_max(&sema->waiters, thread_priority_less, NULL);
+    struct thread* t = list_entry(max_elem, struct thread, elem);
+    list_remove(max_elem);
+    should_yield = t->effective_priority > thread_current()->effective_priority;
+    thread_unblock(t);
+  }
   sema->value++;
   intr_set_level(old_level);
+
+  //! IMPORTANT: We don't want to yield if we are in an interrupt context.
+  if (intr_get_level() == INTR_ON && should_yield) {
+    thread_yield();
+  }
 }
 
 static void sema_test_helper(void* sema_);
@@ -159,6 +185,8 @@ void lock_init(struct lock* lock) {
 
   lock->holder = NULL;
   sema_init(&lock->semaphore, 1);
+  lock->semaphore.lock = lock;
+  lock->waiters_priority = PRI_MIN;
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
@@ -174,8 +202,32 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
 
+  if (lock->holder != NULL) {
+    // If the lock is already held, we need to donate our priority.
+    thread_donate_priority(lock->holder, thread_current());
+  }
+
   sema_down(&lock->semaphore);
   lock->holder = thread_current();
+  list_push_back(&thread_current()->held_locks, &lock->elem);
+
+  // Check list is an atomic operation, since other threads may be
+  // trying to acquire or release the lock at the same time.
+  enum intr_level old_level = intr_disable();
+  // We are now the holder of the lock, remove the waiting lock.
+  thread_current()->waiting_lock = NULL;
+  // Since we are removed from the waiters list, we need to update the lock's waiters priority.
+  struct list_elem* max_elem = list_max(&lock->semaphore.waiters, thread_priority_less, NULL);
+  if (max_elem != list_end(&lock->semaphore.waiters)) {
+    struct thread* t = list_entry(max_elem, struct thread, elem);
+    lock->waiters_priority = t->effective_priority;
+  } else {
+    lock->waiters_priority = PRI_MIN;
+  }
+  // The lock's waiters priority may have changed, so we need to update the
+  // effective priority of the current thread.
+  thread_update_effective_priority(thread_current());
+  intr_set_level(old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -206,6 +258,14 @@ void lock_release(struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   lock->holder = NULL;
+  // Remove the lock from the list of held locks.
+  list_remove(&lock->elem);
+
+  // We need to change our effective priority.
+  // This is important for priority donation.
+  //! IMPORTANT: do not use thread_set_priority() here, as it will
+  //! yield the CPU before sema_up() is called.
+  thread_update_effective_priority(thread_current());
   sema_up(&lock->semaphore);
 }
 
@@ -339,8 +399,12 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
 
-  if (!list_empty(&cond->waiters))
-    sema_up(&list_entry(list_pop_front(&cond->waiters), struct semaphore_elem, elem)->semaphore);
+  if (!list_empty(&cond->waiters)) {
+    // Find the thread with the highest priority in the waiters list.
+    struct list_elem* max_elem = list_max(&cond->waiters, cond_signal_less_func, NULL);
+    list_remove(max_elem);
+    sema_up(&list_entry(max_elem, struct semaphore_elem, elem)->semaphore);
+  }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -355,4 +419,19 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
 
   while (!list_empty(&cond->waiters))
     cond_signal(cond, lock);
+}
+
+static bool cond_signal_less_func(const struct list_elem* a, const struct list_elem* b,
+                                  void* aux UNUSED) {
+  struct semaphore_elem* a_sema = list_entry(a, struct semaphore_elem, elem);
+  struct semaphore_elem* b_sema = list_entry(b, struct semaphore_elem, elem);
+  struct thread* a_thread = list_entry(list_begin(&a_sema->semaphore.waiters), struct thread, elem);
+  struct thread* b_thread = list_entry(list_begin(&b_sema->semaphore.waiters), struct thread, elem);
+  return a_thread->effective_priority < b_thread->effective_priority;
+}
+
+bool lock_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED) {
+  struct lock* t1 = list_entry(a, struct lock, elem);
+  struct lock* t2 = list_entry(b, struct lock, elem);
+  return t1->waiters_priority < t2->waiters_priority;
 }

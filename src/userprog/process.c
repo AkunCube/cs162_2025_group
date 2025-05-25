@@ -27,12 +27,23 @@ static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char** user_argv, int argc, void (**eip)(void), void** esp);
-bool setup_thread(void (**eip)(void), void** esp);
+bool setup_thread(void** esp, Join_status* js);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
-static void handle_exit_close_files(struct thread* cur);
+static void cleanup_process_resources(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
+static Join_status* new_and_init_join_status(struct thread* t, tid_t tid);
+static void init_stack_manager(Stack_manager* sm);
+static bool expand_stack_pool(Stack_manager* sm, int new_size);
+static Stack_slot* process_allocate_stack(Stack_manager* sm);
 static void perform_fork_operations(void* args);
 static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
+static void init_process_descriptors(struct process* pcb);
+static void release_user_stack(struct thread* t);
+static void wait_for_all_threads(struct thread* cur);
+static void finalize_process_exit(void);
+static void set_process_exit_status(struct process* pcb, int exit_code);
+
+#define ALIGN_MASK(type) (~(sizeof(type) - 1))
 
 typedef struct {
   char* command;
@@ -43,6 +54,15 @@ typedef struct {
   const char* user_argv[MAX_ARGS];
   int argc;
 } start_process_args;
+
+typedef struct {
+  stub_fun sf;
+  pthread_fun tf;
+  const void* arg;
+  struct process* pcb;
+  struct semaphore pexec_sema;
+  bool success;
+} start_pthread_args;
 
 typedef struct {
   const struct intr_frame* if_;
@@ -68,6 +88,163 @@ static void init_fork_process_args(fork_process_args* args, const struct intr_fr
   sema_init(&args->pexec_sema, 0);
 }
 
+/**
+ * @brief Initializes arguments for pthread creation and execution.
+ * 
+ * Prepares a start_pthread_args structure to pass critical context 
+ * between the thread creation stub and the target pthread function.
+ * 
+ * @param args    Structure to initialize
+ * @param sf      Stub function that wraps pthread execution
+ * @param tf      Target pthread function to invoke
+ * @param arg     User argument to pass to the pthread function
+ */
+static void init_start_pthread_args(start_pthread_args* args, stub_fun sf, pthread_fun tf,
+                                    const void* arg) {
+  args->sf = sf;
+  args->tf = tf;
+  args->arg = arg;
+  args->pcb = thread_current()->pcb;
+  args->success = false;
+  sema_init(&args->pexec_sema, 0);
+}
+
+static void init_threads_list(Thread_list* threads) {
+  lock_init(&threads->lock);
+  list_init(&threads->threads);
+}
+
+/**
+ * @brief Initializes a Stack_manager and preallocates thread stacks.
+ * 
+ * Sets up the Stack_manager structure and preallocates a fixed number 
+ * of thread stacks (32 by default) in contiguous memory starting from 
+ * the highest available physical address (PHYS_BASE). Stacks are 
+ * allocated downward from PHYS_BASE, each PGSIZE bytes in size.
+ * 
+ * @param sm Pointer to the Stack_manager to initialize
+ * 
+ * @details
+ * This function:
+ * 1. Initializes the manager's lock and free stack list
+ * 2. Preallocates 32 Stack_slot structures
+ * 3. Assigns contiguous stack regions starting from PHYS_BASE
+ * 4. Initializes the free stack list with these preallocated slots
+ */
+static void init_stack_manager(Stack_manager* sm) {
+  lock_init(&sm->lock);
+  list_init(&sm->free_stacks);
+  sm->stack_base = NULL;
+  sm->alloc_pgcnt = 0;
+
+#define N_THREADS 32
+  for (int i = 0; i < N_THREADS; ++i) {
+    Stack_slot* ss = malloc(sizeof(Stack_slot));
+    if (ss == NULL) {
+      PANIC("Failed to allocate stack slot");
+    }
+    ss->stackpg_top = PHYS_BASE - i * PGSIZE;
+    ss->stackpg_bottom = PHYS_BASE - (i + 1) * PGSIZE;
+    ss->is_mapped = false;
+    list_push_back(&sm->free_stacks, &ss->elem);
+    ++sm->alloc_pgcnt;
+  }
+  sm->stack_base = PHYS_BASE - N_THREADS * PGSIZE;
+#undef N_THREADS
+}
+
+/**
+ * @brief Expands the stack pool by allocating additional stack slots.
+ * 
+ * Dynamically increases the number of available stack slots in the 
+ * Stack_manager by the specified increment. New stacks are allocated 
+ * contiguously below the current stack base address, growing downward.
+ * 
+ * @param sm        Pointer to the Stack_manager to expand
+ * @param increment Number of new stack slots to allocate
+ * @return true  if expansion succeeded
+ * @return false if maximum stack limit (MAX_STACK_PAGES) would be exceeded
+ */
+static bool expand_stack_pool(Stack_manager* sm, int increment) {
+  ASSERT(sm != NULL);
+  ASSERT(increment > 0);
+  ASSERT(lock_held_by_current_thread(&sm->lock));
+
+  if (sm->alloc_pgcnt + increment > MAX_STACK_PAGES) {
+    return false;
+  }
+  // Allocate new stack slots.
+  void* stack_base = sm->stack_base;
+  for (int i = 0; i < increment; ++i) {
+    Stack_slot* ss = malloc(sizeof(Stack_slot));
+    if (ss == NULL) {
+      // Free previously allocated slots in case of failure.
+      for (int j = 0; j < i; ++j) {
+        free(list_pop_back(&sm->free_stacks));
+        --sm->alloc_pgcnt;
+      }
+      return false;
+    }
+    ss->stackpg_top = stack_base - i * PGSIZE;
+    ss->stackpg_bottom = stack_base - (i + 1) * PGSIZE;
+    ss->is_mapped = false;
+    list_push_back(&sm->free_stacks, &ss->elem);
+    ++sm->alloc_pgcnt;
+  }
+  sm->stack_base -= increment * PGSIZE;
+  return true;
+}
+
+/**
+ * @brief Allocates a new stack slot from the Stack_manager.
+ * 
+ * Retrieves a free stack slot from the manager's pool. If the pool is 
+ * empty, attempts to expand it by allocating 16 additional stack slots.
+ * 
+ * @param sm Pointer to the Stack_manager
+ * @return Stack_slot* Pointer to the allocated stack slot on success,
+ *                    NULL if maximum stack limit is reached
+ */
+static Stack_slot* process_allocate_stack(Stack_manager* sm) {
+  ASSERT(sm != NULL);
+
+  lock_acquire(&sm->lock);
+  if (list_empty(&sm->free_stacks)) {
+    // Expand the stack pool if we run out of free stacks.
+    if (!expand_stack_pool(sm, 16)) {
+      lock_release(&sm->lock);
+      return NULL;
+    }
+  }
+  Stack_slot* slot = list_entry(list_pop_front(&sm->free_stacks), Stack_slot, elem);
+  lock_release(&sm->lock);
+  return slot;
+}
+
+/**
+ * @brief Initializes all descriptor tables for a new process.
+ * 
+ * Sets up the process's file descriptors, synchronization primitives,
+ * and ELF file pointer to their initial states (NULL). This ensures the
+ * process starts with a clean slate for resource management.
+ * 
+ * @param pcb Pointer to the process control block to initialize
+ */
+static void init_process_descriptors(struct process* pcb) {
+  pcb->elf_file = NULL;
+
+  // Initialize file descriptor table
+  for (int i = 0; i < MAX_OPEN_FILE; ++i) {
+    pcb->ofile[i] = NULL;
+  }
+
+  // Initialize synchronization primitives
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    pcb->user_locks[i] = NULL;
+    pcb->user_semaphores[i] = NULL;
+  }
+}
+
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
@@ -90,7 +267,10 @@ void userprog_init(void) {
   t->pcb->pid = get_pid(t->pcb);
   t->pcb->ppid = -1;
   t->pcb->elf_file = NULL;
+  t->pcb->set_exit_code = false;
   list_init(&t->pcb->children);
+  init_threads_list(&t->pcb->threads);
+  init_stack_manager(&t->pcb->stack_manager);
 }
 
 /* Starts a new thread running a user program loaded from
@@ -177,15 +357,14 @@ static void start_process(void* sargs) {
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
+    t->pcb->set_exit_code = false;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
     list_init(&t->pcb->children);
-    // Clear the user open files.
-    for (int i = 0; i < MAX_OPEN_FILE; ++i) {
-      t->pcb->ofile[i] = NULL;
-    }
-    t->pcb->elf_file = NULL;
+    init_threads_list(&t->pcb->threads);
+    init_stack_manager(&t->pcb->stack_manager);
+    init_process_descriptors(t->pcb);
   }
 
   /* Make a new wait_status and insert it to parent's children list. */
@@ -196,6 +375,17 @@ static void start_process(void* sargs) {
       list_push_back(&parent->children, &ws->elem);
     }
     success = (ws != NULL);
+  }
+
+  if (success) {
+    Join_status* js = new_and_init_join_status(t, t->tid);
+    if (js != NULL) {
+      t->join_status = js;
+      lock_acquire(&new_pcb->threads.lock);
+      list_push_back(&new_pcb->threads.threads, &js->elem);
+      lock_release(&new_pcb->threads.lock);
+    }
+    success = (js != NULL);
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -300,7 +490,7 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
-  handle_exit_close_files(cur);
+  cleanup_process_resources(cur);
   handle_exit_wait_status(cur, cur->pcb->exit_code);
 
   /* Free the PCB of this process and kill this thread
@@ -526,9 +716,7 @@ bool load(const char** user_argv, int argc, void (**eip)(void), void** esp) {
     user_argv[i] = user_sp; /* Reuse */
   }
 
-// 2. Align the stack pointer
-#define ALIGN_MASK(type) (~(sizeof(type) - 1))
-
+  // 2. Align the stack pointer
   uintptr_t* arg_ptr = (uintptr_t*)((uintptr_t)(user_sp)&ALIGN_MASK(uintptr_t));
   arg_ptr -= (argc + 1); /* +1 for the NULL terminator */
   for (int i = 0; i < argc; ++i) {
@@ -672,18 +860,33 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool setup_stack(void** esp) {
-  uint8_t* kpage;
-  bool success = false;
 
-  kpage = palloc_get_page(PAL_USER | PAL_ZERO);
-  if (kpage != NULL) {
-    success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
-    if (success)
-      *esp = PHYS_BASE;
-    else
-      palloc_free_page(kpage);
+  Stack_slot* ss = process_allocate_stack(&thread_current()->pcb->stack_manager);
+  if (ss == NULL) {
+    return false;
   }
-  return success;
+
+  if (ss->is_mapped) {
+    // Stack already mapped, no need to allocate a new one.
+    *esp = ss->stackpg_top;
+    list_push_back(&thread_current()->user_stack, &ss->elem);
+    return true;
+  }
+
+  uint8_t* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+  if (kpage == NULL)
+    return false;
+
+  bool success = install_page(ss->stackpg_bottom, kpage, true);
+  if (!success) {
+    palloc_free_page(kpage);
+    return false;
+  }
+
+  *esp = ss->stackpg_top;
+  ss->is_mapped = true;
+  list_push_back(&thread_current()->user_stack, &ss->elem);
+  return true;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
@@ -718,7 +921,44 @@ pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. You may find it necessary to change the
    function signature. */
-bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; }
+bool setup_thread(void** esp, Join_status* js) {
+  struct thread* t = thread_current();
+  ASSERT(t->pcb != NULL);
+  ASSERT(js != NULL);
+
+  Stack_slot* ss = process_allocate_stack(&t->pcb->stack_manager);
+  if (ss == NULL) {
+    return false;
+  }
+
+  Thread_list* threads = &t->pcb->threads;
+  lock_acquire(&threads->lock);
+  list_push_back(&threads->threads, &js->elem);
+  lock_release(&threads->lock);
+
+  if (ss->is_mapped) {
+    // Stack already mapped, no need to allocate a new one.
+    *esp = ss->stackpg_top;
+    list_push_back(&t->user_stack, &ss->elem);
+    return true;
+  }
+
+  uint8_t* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+  if (kpage == NULL) {
+    return false;
+  }
+
+  bool success = install_page(ss->stackpg_bottom, kpage, true);
+  if (!success) {
+    palloc_free_page(kpage);
+    return false;
+  }
+
+  *esp = ss->stackpg_top;
+  ss->is_mapped = true;
+  list_push_back(&t->user_stack, &ss->elem);
+  return true;
+}
 
 /* Starts a new thread with a new user stack running SF, which takes
    TF and ARG as arguments on its user stack. This new thread may be
@@ -729,7 +969,24 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; 
    This function will be implemented in Project 2: Multithreading and
    should be similar to process_execute (). For now, it does nothing.
    */
-tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSED) { return -1; }
+tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, const void* arg UNUSED) {
+  start_pthread_args* sargs = (start_pthread_args*)malloc(sizeof(start_pthread_args));
+  if (sargs == NULL)
+    return TID_ERROR;
+
+  init_start_pthread_args(sargs, sf, tf, arg);
+  tid_t tid = thread_create("pthread", PRI_DEFAULT, start_pthread, sargs);
+  if (tid == TID_ERROR) {
+    free(sargs);
+    return tid;
+  }
+
+  sema_down(&sargs->pexec_sema);
+  bool success = sargs->success;
+  free(sargs);
+
+  return success ? tid : TID_ERROR;
+}
 
 /* A thread function that creates a new user thread and starts it
    running. Responsible for adding itself to the list of threads in
@@ -737,7 +994,62 @@ tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSE
 
    This function will be implemented in Project 2: Multithreading and
    should be similar to start_process (). For now, it does nothing. */
-static void start_pthread(void* exec_ UNUSED) {}
+static void start_pthread(void* exec_ UNUSED) {
+  start_pthread_args* args = (start_pthread_args*)exec_;
+  struct thread* t = thread_current();
+  bool success = false;
+
+  ASSERT(args->pcb != NULL);
+  t->pcb = args->pcb;
+
+  // Set cr3 to the current process's page directory.
+  process_activate();
+
+  struct intr_frame if_;
+  memset(&if_, 0, sizeof if_);
+
+  /* Initialize interrupt frame. */
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+
+  // Set the thread's function to be executed.
+  if_.eip = (void (*)(void))args->sf;
+
+  Join_status* js = new_and_init_join_status(t, t->tid);
+  success = (js != NULL);
+
+  if (success) {
+    t->join_status = js;
+    success = setup_thread(&if_.esp, js);
+  }
+
+  args->success = success;
+
+  if (!success) {
+    sema_up(&args->pexec_sema);
+    thread_exit();
+    NOT_REACHED();
+  }
+
+  // Set up the arguments on the stack
+  if_.esp -= 16;
+  uintptr_t* arg_ptr = (uintptr_t*)((uintptr_t)(if_.esp) & ALIGN_MASK(uintptr_t));
+
+  /* Aligned to a 16-byte boundary at the time the call instruction is executed */
+  arg_ptr = (uintptr_t*)((uintptr_t)arg_ptr & ~0xf);
+  arg_ptr[0] = (uintptr_t)args->tf;
+  arg_ptr[1] = (uintptr_t)args->arg;
+
+  // Make the fake return address
+  arg_ptr -= 1;
+  *arg_ptr = (uintptr_t)NULL;
+  if_.esp = arg_ptr;
+
+  sema_up(&args->pexec_sema);
+  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+  NOT_REACHED();
+}
 
 /* Waits for thread with TID to die, if that thread was spawned
    in the same process and has not been waited on yet. Returns TID on
@@ -746,7 +1058,34 @@ static void start_pthread(void* exec_ UNUSED) {}
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-tid_t pthread_join(tid_t tid UNUSED) { return -1; }
+tid_t pthread_join(tid_t tid) {
+  struct thread* cur = thread_current();
+  if (tid == cur->tid || tid == TID_ERROR) {
+    return TID_ERROR;
+  }
+
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+
+  Thread_list* thread_list = &pcb->threads;
+  lock_acquire(&thread_list->lock);
+
+  for (struct list_elem* e = list_begin(&thread_list->threads);
+       e != list_end(&thread_list->threads); e = list_next(e)) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    if (js->tid == tid) {
+      lock_release(&thread_list->lock);
+      sema_down(&js->dead);
+      // Remove the thread from the list and free the resources.
+      list_remove(e);
+      free(js);
+      return tid;
+    }
+  }
+
+  lock_release(&thread_list->lock);
+  return TID_ERROR;
+}
 
 /* Free the current thread's resources. Most resources will
    be freed on thread_exit(), so all we have to do is deallocate the
@@ -757,7 +1096,22 @@ tid_t pthread_join(tid_t tid UNUSED) { return -1; }
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-void pthread_exit(void) {}
+void pthread_exit(void) {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+
+  // Release the thread's stack.
+  release_user_stack(cur);
+
+  // Wake up any waiters on this thread after we release the stack.
+  cur->join_status->target = NULL;
+  sema_up(&cur->join_status->dead);
+
+  // We let waiter to do clean up of Join_status.
+  cur->join_status = NULL;
+  thread_exit();
+}
 
 /* Only to be used when the main thread explicitly calls pthread_exit.
    The main thread should wait on all threads in the process to
@@ -767,7 +1121,25 @@ void pthread_exit(void) {}
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-void pthread_exit_main(void) {}
+void pthread_exit_main(void) {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+  ASSERT(is_main_thread(cur, pcb));
+
+  // Release the thread's user stack.
+  release_user_stack(cur);
+
+  // Wake up any waiters on this thread after we release the stack.
+  sema_up(&cur->join_status->dead);
+
+  cur->join_status = NULL;
+
+  wait_for_all_threads(cur);
+  if (!pcb->set_exit_code)
+    set_process_exit_status(pcb, 0);
+  finalize_process_exit();
+}
 
 static void handle_exit_wait_status(struct thread* cur, int exit_code) {
   // Iterate through the list of children and free resources if needed.
@@ -822,19 +1194,114 @@ static Wait_status* new_and_init_wait_status(pid_t pid) {
   return ws;
 }
 
-static void handle_exit_close_files(struct thread* cur) {
-  // Close all open files.
-  for (int i = 2; i < MAX_OPEN_FILE; ++i) {
-    struct file* of = cur->pcb->ofile[i];
-    if (of != NULL) {
-      file_close(of);
-      cur->pcb->ofile[i] = NULL;
+/**
+ * @brief Allocates and initializes a new Join_status structure.
+ * 
+ * Creates a Join_status object to track the termination status of a thread
+ * with the specified TID. The returned structure is initialized with:
+ * - The provided thread ID (tid)
+ * - A semaphore ('dead') initialized to 0, used to block joining threads
+ * 
+ * @param tid The thread ID (tid_t) of the target thread to track
+ * @param t Pointer to the target thread
+ * @return Join_status* Pointer to the initialized structure on success,
+ *         NULL if memory allocation fails
+ */
+static Join_status* new_and_init_join_status(struct thread* t, tid_t tid) {
+  Join_status* js = (Join_status*)malloc(sizeof(Join_status));
+  if (js == NULL)
+    return NULL;
+
+  js->tid = tid;
+  js->target = t;
+  sema_init(&js->dead, 0);
+  return js;
+}
+
+/**
+ * @brief Cleans up all resources held by the process during termination.
+ * 
+ * Releases all synchronization primitives (locks and semaphores), closes all
+ * open files (including the ELF executable), and frees stack management resources.
+ * Ensures proper resource deallocation to prevent leaks during process exit.
+ * 
+ * @param cur_thread Pointer to the main thread initiating process cleanup
+ */
+static void cleanup_process_resources(struct thread* cur_thread) {
+  struct process* pcb = cur_thread->pcb;
+  ASSERT(pcb != NULL);
+  ASSERT(is_main_thread(cur_thread, pcb));
+
+  // Phase 1: Release all locks held by the main thread
+  while (!list_empty(&cur_thread->held_locks)) {
+    struct list_elem* e = list_pop_front(&cur_thread->held_locks);
+    struct lock* l = list_entry(e, struct lock, elem);
+
+    // Unlock the lock and clear its holder
+    l->holder = NULL;
+    sema_up(&l->semaphore); // Wake any waiting threads (if not already handled)
+  }
+
+  // Phase 2: Free all user locks and semaphores
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    if (pcb->user_locks[i] != NULL) {
+      free(pcb->user_locks[i]);
+      pcb->user_locks[i] = NULL;
     }
   }
-  // Close elf file.
-  if (cur->pcb->elf_file != NULL) {
-    file_close(cur->pcb->elf_file);
-    cur->pcb->elf_file = NULL;
+
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    if (pcb->user_semaphores[i] != NULL) {
+      free(pcb->user_semaphores[i]);
+      pcb->user_semaphores[i] = NULL;
+    }
+  }
+
+  // Phase 3: Clean up stack manager resources
+  lock_acquire(&pcb->stack_manager.lock);
+  while (!list_empty(&pcb->stack_manager.free_stacks)) {
+    struct list_elem* e = list_pop_front(&pcb->stack_manager.free_stacks);
+    Stack_slot* ss = list_entry(e, Stack_slot, elem);
+    free(ss);
+  }
+  pcb->stack_manager.alloc_pgcnt = 0; // Reset allocation counter
+  lock_release(&pcb->stack_manager.lock);
+
+  // Phase 4: Close all user files (skip stdin/stdout)
+  for (int i = 2; i < MAX_OPEN_FILE; ++i) {
+    if (pcb->ofile[i] != NULL) {
+      file_close(pcb->ofile[i]);
+      pcb->ofile[i] = NULL;
+    }
+  }
+
+  // Phase 5: Close the ELF executable file
+  if (pcb->elf_file != NULL) {
+    file_close(pcb->elf_file);
+    pcb->elf_file = NULL;
+  }
+}
+
+/**
+ * @brief Releases all user stacks allocated to a thread and returns them to the pool.
+ * 
+ * Transfers ownership of all stack slots associated with the given thread back to the 
+ * process's stack manager. This ensures the stack memory can be reused by other threads.
+ * 
+ * @param t Pointer to the thread whose stacks should be released
+ */
+static void release_user_stack(struct thread* t) {
+  struct process* pcb = t->pcb;
+  ASSERT(pcb != NULL);
+
+  // Release the thread's user stack.
+  ASSERT(list_size(&t->user_stack) > 0);
+  for (struct list_elem* e = list_begin(&t->user_stack); e != list_end(&t->user_stack);) {
+    Stack_slot* ss = list_entry(e, Stack_slot, elem);
+    e = list_remove(e);
+    lock_acquire(&t->pcb->stack_manager.lock);
+    list_push_front(&t->pcb->stack_manager.free_stacks, &ss->elem);
+    lock_release(&t->pcb->stack_manager.lock);
   }
 }
 
@@ -865,10 +1332,14 @@ static void perform_fork_operations(void* args) {
     new_pcb->pagedir = NULL;
     t->pcb = new_pcb;
     t->pcb->main_thread = t;
+    t->pcb->set_exit_code = false;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
     list_init(&t->pcb->children);
+    init_threads_list(&t->pcb->threads);
+    init_stack_manager(&t->pcb->stack_manager);
+    init_process_descriptors(t->pcb);
     // Copy the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
       t->pcb->ofile[i] = share_file(parent->ofile[i]);
@@ -876,6 +1347,7 @@ static void perform_fork_operations(void* args) {
 
     t->pcb->elf_file = share_file(parent->elf_file);
     file_deny_write(t->pcb->elf_file);
+    // TODO: Copy lock and semaphore objects if needed.
   }
 
   // Copy the page directory.
@@ -901,6 +1373,17 @@ static void perform_fork_operations(void* args) {
   }
 
   if (success) {
+    Join_status* js = new_and_init_join_status(t, t->tid);
+    if (js != NULL) {
+      t->join_status = js;
+      lock_acquire(&new_pcb->threads.lock);
+      list_push_back(&new_pcb->threads.threads, &js->elem);
+      lock_release(&new_pcb->threads.lock);
+    }
+    success = (js != NULL);
+  }
+
+  if (success) {
     memset(&cur_if, 0, sizeof cur_if);
     // Copy the parent interrupt frame to the child.
     memcpy(&cur_if, fargs->if_, sizeof(struct intr_frame));
@@ -922,4 +1405,138 @@ static void perform_fork_operations(void* args) {
   }
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&cur_if) : "memory");
   NOT_REACHED();
+}
+
+/**
+ * @brief Terminates the current process with the given exit status.
+ * 
+ * Marks all active threads in the process for termination, waits for them to exit,
+ * and performs final cleanup before exiting the process. The main thread is responsible
+ * for coordinating the termination of all worker threads and releasing process resources.
+ * 
+ * @param exit_code Exit status code to be returned to the parent process
+ */
+void process_exit_with_status(int exit_code) {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+
+  // Set the process exit code (can only be set once)
+  set_process_exit_status(pcb, exit_code);
+
+  // Mark all other threads in the process for termination
+  lock_acquire(&pcb->threads.lock);
+  for (struct list_elem* e = list_begin(&pcb->threads.threads);
+       e != list_end(&pcb->threads.threads); e = list_next(e)) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    struct thread* target = js->target;
+
+    // How to handle the exited thread? We use sema_try_down to avoid blocking
+    if (sema_try_down(&js->dead)) {
+      ASSERT(target == NULL);
+      sema_up(&js->dead); // Remain unchanged.
+      continue;
+    }
+
+    // Skip the current thread.
+    if (target != cur) {
+      target->force_exit = true;
+    }
+  }
+  lock_release(&pcb->threads.lock);
+
+#ifdef THREADS
+  if (is_main_thread(cur, pcb)) {
+    wait_for_all_threads(cur);
+    finalize_process_exit();
+  } else {
+    //! We let the main thread handle the cleanup of the process.
+    pthread_exit();
+  }
+#else
+  finalize_process_exit();
+#endif
+
+  NOT_REACHED();
+}
+
+/**
+ * @brief Waits for all threads in the process to terminate.
+ * 
+ * Blocks the calling thread (typically the main thread) until all other threads
+ * in the process have exited. Cleans up Join_status structures after threads exit.
+ * 
+ * @param cur_thread Pointer to the current thread (main thread)
+ */
+static void wait_for_all_threads(struct thread* cur) {
+  struct process* pcb = cur->pcb;
+  int cur_tid = cur->tid;
+  ASSERT(pcb != NULL);
+
+  // Wait for all remaining threads in the process to terminate.
+  Thread_list* thread_list = &pcb->threads;
+
+  lock_acquire(&thread_list->lock);
+  for (struct list_elem* e = list_begin(&thread_list->threads);
+       e != list_end(&thread_list->threads);) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    lock_release(&thread_list->lock);
+    if (js->tid == cur_tid) {
+      // Skip the current thread, as it is the main thread.
+      e = list_next(e);
+    } else {
+      sema_down(&js->dead);
+      e = list_remove(e);
+      free(js);
+    }
+    lock_acquire(&thread_list->lock);
+  }
+  lock_release(&thread_list->lock);
+
+  // Now that all threads have terminated, but maybe some thread doesn't join main,
+  // so we need to clean up our Join_status.
+  lock_acquire(&thread_list->lock);
+  size_t length = list_size(&thread_list->threads);
+  ASSERT(length == 0 || length == 1);
+  if (length == 1) {
+    // The main thread is the only thread left, so we can free the Join_status.
+    Join_status* js = list_entry(list_front(&thread_list->threads), Join_status, elem);
+    ASSERT(js->tid == cur_tid);
+    list_remove(&js->elem);
+    free(js);
+  }
+  lock_release(&thread_list->lock);
+}
+
+/**
+ * @brief Performs final cleanup and exits the process.
+ * 
+ * Prints the process exit message and initiates the final exit sequence,
+ * releasing all process resources and notifying the parent process.
+ */
+static void finalize_process_exit() {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+  ASSERT(pcb->set_exit_code);
+  ASSERT(is_main_thread(cur, pcb));
+
+  printf("%s: exit(%d)\n", pcb->process_name, pcb->exit_code);
+  process_exit();
+}
+
+/**
+ * @brief Sets the exit code for the process.
+ * 
+ * Validates and records the exit code for the process. Ensures the exit code
+ * is set only once to prevent overwriting the original status.
+ * 
+ * @param pcb      Pointer to the process control block
+ * @param exit_code Exit status code (typically 0 for success, non-zero for errors)
+ */
+static void set_process_exit_status(struct process* pcb, int exit_code) {
+  ASSERT(pcb != NULL);
+  ASSERT(!pcb->set_exit_code); // Should not be set before.
+  pcb->exit_code = exit_code;
+  pcb->set_exit_code = true;
 }

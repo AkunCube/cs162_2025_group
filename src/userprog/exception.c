@@ -79,10 +79,7 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-      // If a process exits due to a fault, make sure print `exit(-1)`.
-      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
-      thread_current()->pcb->exit_code = -1;
-      process_exit();
+      process_exit_with_status(-1);
       NOT_REACHED();
 
     case SEL_KCSEG:
@@ -144,7 +141,7 @@ static void page_fault(struct intr_frame* f) {
    */
   // TODO: should we check if we are in system call?
   if (f->cs == SEL_KCSEG && is_user_vaddr(fault_addr)) {
-    thread_terminate(-1);
+    process_exit_with_status(-1);
     NOT_REACHED();
   }
 
