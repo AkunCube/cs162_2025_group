@@ -340,7 +340,7 @@ void thread_exit(void) {
   while (!list_empty(&cur->held_locks)) {
     struct list_elem* e = list_pop_front(&cur->held_locks);
     struct lock* l = list_entry(e, struct lock, elem);
-    l->holder = NULL;
+    lock_release(l);
   }
   cur->waiting_lock = NULL;
 

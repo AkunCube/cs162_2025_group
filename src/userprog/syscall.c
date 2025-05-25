@@ -5,8 +5,8 @@
 #include <syscall-nr.h>
 #include "devices/input.h"
 #include "devices/shutdown.h"
-#include "stdbool.h"
-#include "stddef.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/pagedir.h"
@@ -306,6 +306,7 @@ uint32_t sys_lock_init(uint32_t* args) {
   if (lock == NULL)
     return false;
 
+  validate_buffer_in_user_region(lock, sizeof(char));
   int lock_id = allocate_user_lock(thread_current()->pcb);
   if (lock_id == -1)
     return false;
@@ -317,6 +318,7 @@ uint32_t sys_lock_init(uint32_t* args) {
 uint32_t sys_lock_acquire(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   char* lock = (char*)args[0];
+  validate_buffer_in_user_region(lock, sizeof(char));
   struct lock* user_lock = validate_lock_descriptor(lock);
   if (user_lock == NULL)
     return false;
@@ -331,6 +333,7 @@ uint32_t sys_lock_acquire(uint32_t* args) {
 uint32_t sys_lock_release(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   char* lock = (char*)args[0];
+  validate_buffer_in_user_region(lock, sizeof(char));
   struct lock* user_lock = validate_lock_descriptor(lock);
   if (user_lock == NULL)
     return false;
@@ -375,6 +378,8 @@ uint32_t sys_sema_init(uint32_t* args) {
 
   if (sema == NULL || val < 0)
     return false;
+
+  validate_buffer_in_user_region(sema, sizeof(char));
   int sema_id = allocate_user_sema(thread_current()->pcb, (unsigned int)val);
   if (sema_id == -1)
     return false;
@@ -386,6 +391,7 @@ uint32_t sys_sema_init(uint32_t* args) {
 uint32_t sys_sema_up(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   char* sema = (char*)args[0];
+  validate_buffer_in_user_region(sema, sizeof(char));
   struct semaphore* user_sema = validate_sema_descriptor(sema);
   if (user_sema == NULL)
     return false;
@@ -397,6 +403,7 @@ uint32_t sys_sema_up(uint32_t* args) {
 uint32_t sys_sema_down(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   char* sema = (char*)args[0];
+  validate_buffer_in_user_region(sema, sizeof(char));
   struct semaphore* user_sema = validate_sema_descriptor(sema);
   if (user_sema == NULL)
     return false;
