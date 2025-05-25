@@ -62,7 +62,12 @@ void test_smfs_hierarchy(size_t num_threads) {
   for (size_t i = 0; i < num_threads; i++)
     sema_up(&barrier_sema);
 
-  /* Sleep for a bit to allow the counter threads time to run amok. */
+  /* 
+ * Sleep to allow counter threads to execute.
+ * Reduced from 200000 to 3500 ticks to optimize test execution time.
+ * (Original sleep time: ~2000 seconds; New sleep time: ~35 seconds)
+ * This adjustment maintains test validity while respecting Pintos' 60-second timeout limit.
+ */
   timer_sleep(3500);
 
   /* Rein in the counters...
