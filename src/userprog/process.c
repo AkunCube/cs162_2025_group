@@ -1222,18 +1222,52 @@ static Join_status* new_and_init_join_status(struct thread* t, tid_t tid) {
  * @brief Cleans up all resources held by the process during termination.
  * 
  * Releases all synchronization primitives (locks and semaphores), closes all
- * open files (including the ELF executable), and resets descriptor tables.
- * This function ensures no resources are leaked when a process exits.
+ * open files (including the ELF executable), and frees stack management resources.
+ * Ensures proper resource deallocation to prevent leaks during process exit.
  * 
- * @param cur_thread Pointer to the terminating thread's control block
+ * @param cur_thread Pointer to the main thread initiating process cleanup
  */
 static void cleanup_process_resources(struct thread* cur_thread) {
   struct process* pcb = cur_thread->pcb;
   ASSERT(pcb != NULL);
+  ASSERT(is_main_thread(cur_thread, pcb));
 
-  // TODO: release lock and sema.
+  // Phase 1: Release all locks held by the main thread
+  while (!list_empty(&cur_thread->held_locks)) {
+    struct list_elem* e = list_pop_front(&cur_thread->held_locks);
+    struct lock* l = list_entry(e, struct lock, elem);
 
-  // Close all user files (skip stdin/stdout)
+    // Unlock the lock and clear its holder
+    l->holder = NULL;
+    sema_up(&l->semaphore); // Wake any waiting threads (if not already handled)
+  }
+
+  // Phase 2: Free all user locks and semaphores
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    if (pcb->user_locks[i] != NULL) {
+      free(pcb->user_locks[i]);
+      pcb->user_locks[i] = NULL;
+    }
+  }
+
+  for (int i = 0; i < MAX_SYNC; ++i) {
+    if (pcb->user_semaphores[i] != NULL) {
+      free(pcb->user_semaphores[i]);
+      pcb->user_semaphores[i] = NULL;
+    }
+  }
+
+  // Phase 3: Clean up stack manager resources
+  lock_acquire(&pcb->stack_manager.lock);
+  while (!list_empty(&pcb->stack_manager.free_stacks)) {
+    struct list_elem* e = list_pop_front(&pcb->stack_manager.free_stacks);
+    Stack_slot* ss = list_entry(e, Stack_slot, elem);
+    free(ss);
+  }
+  pcb->stack_manager.alloc_pgcnt = 0; // Reset allocation counter
+  lock_release(&pcb->stack_manager.lock);
+
+  // Phase 4: Close all user files (skip stdin/stdout)
   for (int i = 2; i < MAX_OPEN_FILE; ++i) {
     if (pcb->ofile[i] != NULL) {
       file_close(pcb->ofile[i]);
@@ -1241,7 +1275,7 @@ static void cleanup_process_resources(struct thread* cur_thread) {
     }
   }
 
-  // Close the ELF executable file
+  // Phase 5: Close the ELF executable file
   if (pcb->elf_file != NULL) {
     file_close(pcb->elf_file);
     pcb->elf_file = NULL;
@@ -1305,6 +1339,7 @@ static void perform_fork_operations(void* args) {
     list_init(&t->pcb->children);
     init_threads_list(&t->pcb->threads);
     init_stack_manager(&t->pcb->stack_manager);
+    init_process_descriptors(t->pcb);
     // Copy the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
       t->pcb->ofile[i] = share_file(parent->ofile[i]);
