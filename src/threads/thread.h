@@ -42,11 +42,14 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
 
+struct thread;
+
 /* Thread join status. This structure is used to keep track of
    the threads that are waiting for a specific thread to finish
    execution. It contains the thread ID of the target thread and
    a semaphore to signal when the target thread has finished. */
 typedef struct {
+  struct thread* target; /* Pointer to target thread. target->tid == tid */
   tid_t tid;             /* Thread ID of the target thread. */
   struct semaphore dead; /* Semaphore to signal when the target thread has finished. */
   struct list_elem elem; /* List element for linking join statuses. */
@@ -125,6 +128,7 @@ struct thread {
   struct process* pcb;      /* Process control block if this thread is a userprog */
   Join_status* join_status; /* Join status for this thread */
   struct list user_stack;   /* User stack for this thread */
+  bool force_exit;          /* If true, the thread will exit immediately */
 #endif
 
   int64_t sleep_ticks;    /* Number of ticks to sleep */
@@ -185,7 +189,6 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
-void thread_terminate(int exit_code);
 bool thread_priority_less(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED);
 void thread_donate_priority(struct thread* target, struct thread* donor);
 void thread_update_effective_priority(struct thread* t);

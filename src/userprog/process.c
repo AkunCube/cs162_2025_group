@@ -29,9 +29,9 @@ static thread_func start_pthread NO_RETURN;
 static bool load(const char** user_argv, int argc, void (**eip)(void), void** esp);
 bool setup_thread(void** esp, Join_status* js);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
-static void handle_exit_close_files(struct thread* cur);
+static void cleanup_process_resources(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
-static Join_status* new_and_init_join_status(tid_t tid);
+static Join_status* new_and_init_join_status(struct thread* t, tid_t tid);
 static void init_stack_manager(Stack_manager* sm);
 static bool expand_stack_pool(Stack_manager* sm, int new_size);
 static Stack_slot* process_allocate_stack(Stack_manager* sm);
@@ -39,6 +39,9 @@ static void perform_fork_operations(void* args);
 static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
 static void init_process_descriptors(struct process* pcb);
 static void release_user_stack(struct thread* t);
+static void wait_for_all_threads(struct thread* cur);
+static void finalize_process_exit(void);
+static void set_process_exit_status(struct process* pcb, int exit_code);
 
 #define ALIGN_MASK(type) (~(sizeof(type) - 1))
 
@@ -264,6 +267,7 @@ void userprog_init(void) {
   t->pcb->pid = get_pid(t->pcb);
   t->pcb->ppid = -1;
   t->pcb->elf_file = NULL;
+  t->pcb->set_exit_code = false;
   list_init(&t->pcb->children);
   init_threads_list(&t->pcb->threads);
   init_stack_manager(&t->pcb->stack_manager);
@@ -353,6 +357,7 @@ static void start_process(void* sargs) {
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
+    t->pcb->set_exit_code = false;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
@@ -373,7 +378,7 @@ static void start_process(void* sargs) {
   }
 
   if (success) {
-    Join_status* js = new_and_init_join_status(t->tid);
+    Join_status* js = new_and_init_join_status(t, t->tid);
     if (js != NULL) {
       t->join_status = js;
       lock_acquire(&new_pcb->threads.lock);
@@ -485,7 +490,7 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
-  handle_exit_close_files(cur);
+  cleanup_process_resources(cur);
   handle_exit_wait_status(cur, cur->pcb->exit_code);
 
   /* Free the PCB of this process and kill this thread
@@ -1011,7 +1016,7 @@ static void start_pthread(void* exec_ UNUSED) {
   // Set the thread's function to be executed.
   if_.eip = (void (*)(void))args->sf;
 
-  Join_status* js = new_and_init_join_status(t->tid);
+  Join_status* js = new_and_init_join_status(t, t->tid);
   success = (js != NULL);
 
   if (success) {
@@ -1100,6 +1105,7 @@ void pthread_exit(void) {
   release_user_stack(cur);
 
   // Wake up any waiters on this thread after we release the stack.
+  cur->join_status->target = NULL;
   sema_up(&cur->join_status->dead);
 
   // We let waiter to do clean up of Join_status.
@@ -1118,8 +1124,8 @@ void pthread_exit(void) {
 void pthread_exit_main(void) {
   struct thread* cur = thread_current();
   struct process* pcb = cur->pcb;
-  int cur_tid = cur->tid;
   ASSERT(pcb != NULL);
+  ASSERT(is_main_thread(cur, pcb));
 
   // Release the thread's user stack.
   release_user_stack(cur);
@@ -1129,41 +1135,10 @@ void pthread_exit_main(void) {
 
   cur->join_status = NULL;
 
-  // Wait for all remaining threads in the process to terminate.
-  Thread_list* thread_list = &pcb->threads;
-
-  lock_acquire(&thread_list->lock);
-  for (struct list_elem* e = list_begin(&thread_list->threads);
-       e != list_end(&thread_list->threads);) {
-    Join_status* js = list_entry(e, Join_status, elem);
-    lock_release(&thread_list->lock);
-    if (js->tid == cur_tid) {
-      // Skip the current thread, as it is the main thread.
-      e = list_next(e);
-    } else {
-      sema_down(&js->dead);
-      e = list_remove(e);
-      free(js);
-    }
-    lock_acquire(&thread_list->lock);
-  }
-  lock_release(&thread_list->lock);
-
-  // Now that all threads have terminated, but maybe some thread doesn't join main,
-  // so we need to clean up our Join_status.
-  lock_acquire(&thread_list->lock);
-  size_t length = list_size(&thread_list->threads);
-  ASSERT(length == 0 || length == 1);
-  if (length == 1) {
-    // The main thread is the only thread left, so we can free the Join_status.
-    Join_status* js = list_entry(list_front(&thread_list->threads), Join_status, elem);
-    ASSERT(js->tid == cur_tid);
-    list_remove(&js->elem);
-    free(js);
-  }
-  lock_release(&thread_list->lock);
-
-  thread_terminate(0);
+  wait_for_all_threads(cur);
+  if (!pcb->set_exit_code)
+    set_process_exit_status(pcb, 0);
+  finalize_process_exit();
 }
 
 static void handle_exit_wait_status(struct thread* cur, int exit_code) {
@@ -1228,32 +1203,48 @@ static Wait_status* new_and_init_wait_status(pid_t pid) {
  * - A semaphore ('dead') initialized to 0, used to block joining threads
  * 
  * @param tid The thread ID (tid_t) of the target thread to track
+ * @param t Pointer to the target thread
  * @return Join_status* Pointer to the initialized structure on success,
  *         NULL if memory allocation fails
  */
-static Join_status* new_and_init_join_status(tid_t tid) {
+static Join_status* new_and_init_join_status(struct thread* t, tid_t tid) {
   Join_status* js = (Join_status*)malloc(sizeof(Join_status));
   if (js == NULL)
     return NULL;
 
   js->tid = tid;
+  js->target = t;
   sema_init(&js->dead, 0);
   return js;
 }
 
-static void handle_exit_close_files(struct thread* cur) {
-  // Close all open files.
+/**
+ * @brief Cleans up all resources held by the process during termination.
+ * 
+ * Releases all synchronization primitives (locks and semaphores), closes all
+ * open files (including the ELF executable), and resets descriptor tables.
+ * This function ensures no resources are leaked when a process exits.
+ * 
+ * @param cur_thread Pointer to the terminating thread's control block
+ */
+static void cleanup_process_resources(struct thread* cur_thread) {
+  struct process* pcb = cur_thread->pcb;
+  ASSERT(pcb != NULL);
+
+  // TODO: release lock and sema.
+
+  // Close all user files (skip stdin/stdout)
   for (int i = 2; i < MAX_OPEN_FILE; ++i) {
-    struct file* of = cur->pcb->ofile[i];
-    if (of != NULL) {
-      file_close(of);
-      cur->pcb->ofile[i] = NULL;
+    if (pcb->ofile[i] != NULL) {
+      file_close(pcb->ofile[i]);
+      pcb->ofile[i] = NULL;
     }
   }
-  // Close elf file.
-  if (cur->pcb->elf_file != NULL) {
-    file_close(cur->pcb->elf_file);
-    cur->pcb->elf_file = NULL;
+
+  // Close the ELF executable file
+  if (pcb->elf_file != NULL) {
+    file_close(pcb->elf_file);
+    pcb->elf_file = NULL;
   }
 }
 
@@ -1307,6 +1298,7 @@ static void perform_fork_operations(void* args) {
     new_pcb->pagedir = NULL;
     t->pcb = new_pcb;
     t->pcb->main_thread = t;
+    t->pcb->set_exit_code = false;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
@@ -1346,7 +1338,7 @@ static void perform_fork_operations(void* args) {
   }
 
   if (success) {
-    Join_status* js = new_and_init_join_status(t->tid);
+    Join_status* js = new_and_init_join_status(t, t->tid);
     if (js != NULL) {
       t->join_status = js;
       lock_acquire(&new_pcb->threads.lock);
@@ -1378,4 +1370,138 @@ static void perform_fork_operations(void* args) {
   }
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&cur_if) : "memory");
   NOT_REACHED();
+}
+
+/**
+ * @brief Terminates the current process with the given exit status.
+ * 
+ * Marks all active threads in the process for termination, waits for them to exit,
+ * and performs final cleanup before exiting the process. The main thread is responsible
+ * for coordinating the termination of all worker threads and releasing process resources.
+ * 
+ * @param exit_code Exit status code to be returned to the parent process
+ */
+void process_exit_with_status(int exit_code) {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+
+  // Set the process exit code (can only be set once)
+  set_process_exit_status(pcb, exit_code);
+
+  // Mark all other threads in the process for termination
+  lock_acquire(&pcb->threads.lock);
+  for (struct list_elem* e = list_begin(&pcb->threads.threads);
+       e != list_end(&pcb->threads.threads); e = list_next(e)) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    struct thread* target = js->target;
+
+    // How to handle the exited thread? We use sema_try_down to avoid blocking
+    if (sema_try_down(&js->dead)) {
+      ASSERT(target == NULL);
+      sema_up(&js->dead); // Remain unchanged.
+      continue;
+    }
+
+    // Skip the current thread.
+    if (target != cur) {
+      target->force_exit = true;
+    }
+  }
+  lock_release(&pcb->threads.lock);
+
+#ifdef THREADS
+  if (is_main_thread(cur, pcb)) {
+    wait_for_all_threads(cur);
+    finalize_process_exit();
+  } else {
+    //! We let the main thread handle the cleanup of the process.
+    pthread_exit();
+  }
+#else
+  finalize_process_exit();
+#endif
+
+  NOT_REACHED();
+}
+
+/**
+ * @brief Waits for all threads in the process to terminate.
+ * 
+ * Blocks the calling thread (typically the main thread) until all other threads
+ * in the process have exited. Cleans up Join_status structures after threads exit.
+ * 
+ * @param cur_thread Pointer to the current thread (main thread)
+ */
+static void wait_for_all_threads(struct thread* cur) {
+  struct process* pcb = cur->pcb;
+  int cur_tid = cur->tid;
+  ASSERT(pcb != NULL);
+
+  // Wait for all remaining threads in the process to terminate.
+  Thread_list* thread_list = &pcb->threads;
+
+  lock_acquire(&thread_list->lock);
+  for (struct list_elem* e = list_begin(&thread_list->threads);
+       e != list_end(&thread_list->threads);) {
+    Join_status* js = list_entry(e, Join_status, elem);
+    lock_release(&thread_list->lock);
+    if (js->tid == cur_tid) {
+      // Skip the current thread, as it is the main thread.
+      e = list_next(e);
+    } else {
+      sema_down(&js->dead);
+      e = list_remove(e);
+      free(js);
+    }
+    lock_acquire(&thread_list->lock);
+  }
+  lock_release(&thread_list->lock);
+
+  // Now that all threads have terminated, but maybe some thread doesn't join main,
+  // so we need to clean up our Join_status.
+  lock_acquire(&thread_list->lock);
+  size_t length = list_size(&thread_list->threads);
+  ASSERT(length == 0 || length == 1);
+  if (length == 1) {
+    // The main thread is the only thread left, so we can free the Join_status.
+    Join_status* js = list_entry(list_front(&thread_list->threads), Join_status, elem);
+    ASSERT(js->tid == cur_tid);
+    list_remove(&js->elem);
+    free(js);
+  }
+  lock_release(&thread_list->lock);
+}
+
+/**
+ * @brief Performs final cleanup and exits the process.
+ * 
+ * Prints the process exit message and initiates the final exit sequence,
+ * releasing all process resources and notifying the parent process.
+ */
+static void finalize_process_exit() {
+  struct thread* cur = thread_current();
+  struct process* pcb = cur->pcb;
+  ASSERT(pcb != NULL);
+  ASSERT(pcb->set_exit_code);
+  ASSERT(is_main_thread(cur, pcb));
+
+  printf("%s: exit(%d)\n", pcb->process_name, pcb->exit_code);
+  process_exit();
+}
+
+/**
+ * @brief Sets the exit code for the process.
+ * 
+ * Validates and records the exit code for the process. Ensures the exit code
+ * is set only once to prevent overwriting the original status.
+ * 
+ * @param pcb      Pointer to the process control block
+ * @param exit_code Exit status code (typically 0 for success, non-zero for errors)
+ */
+static void set_process_exit_status(struct process* pcb, int exit_code) {
+  ASSERT(pcb != NULL);
+  ASSERT(!pcb->set_exit_code); // Should not be set before.
+  pcb->exit_code = exit_code;
+  pcb->set_exit_code = true;
 }

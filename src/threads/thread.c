@@ -69,6 +69,8 @@ static void* alloc_frame(struct thread*, size_t size);
 static void schedule(void);
 static void thread_enqueue(struct thread* t);
 static tid_t allocate_tid(void);
+static void terminate_thread_immediately(struct thread* t);
+static void release_thread_resources(struct thread* t);
 void thread_switch_tail(struct thread* prev);
 
 static void kernel_thread(thread_func*, void* aux);
@@ -326,12 +328,22 @@ tid_t thread_tid(void) { return thread_current()->tid; }
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void thread_exit(void) {
+  struct thread* cur = thread_current();
   ASSERT(!intr_context());
 
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_switch_tail(). */
   intr_disable();
+
+  // Release all locks held by this thread.
+  while (!list_empty(&cur->held_locks)) {
+    struct list_elem* e = list_pop_front(&cur->held_locks);
+    struct lock* l = list_entry(e, struct lock, elem);
+    l->holder = NULL;
+  }
+  cur->waiting_lock = NULL;
+
   list_remove(&thread_current()->allelem);
   thread_current()->status = THREAD_DYING;
   schedule();
@@ -486,6 +498,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->effective_priority = t->priority = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
+  t->force_exit = false;
   list_init(&t->held_locks);
   list_init(&t->user_stack);
 
@@ -633,6 +646,9 @@ static void schedule(void) {
     frstor(fpu_state);
   }
   thread_switch_tail(prev);
+  if (thread_current()->force_exit) {
+    terminate_thread_immediately(thread_current());
+  }
 }
 
 /* Returns a tid to use for a new thread. */
@@ -650,18 +666,6 @@ static tid_t allocate_tid(void) {
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
-
-/**
- * @brief terminate the current thread and exit the process.
- * 
- * @param exit_code 
- */
-void thread_terminate(int exit_code) {
-  struct process* pcb = thread_current()->pcb;
-  pcb->exit_code = exit_code;
-  printf("%s: exit(%d)\n", pcb->process_name, exit_code);
-  process_exit();
-}
 
 /**
  * @brief Compare thread priorities for sorting in a priority queue
@@ -872,5 +876,85 @@ static void update_fair_scheduler_thread_metrics(void) {
     }
     float proportion = ((float)cur->priority) / ((float)total_priority);
     fsd->time_quanta = MAX(MIN_QUANTA, MIN_LATENCY * proportion);
+  }
+}
+
+/**
+ * @brief Immediately terminates a thread and triggers resource cleanup.
+ * 
+ * Forces the specified thread to exit immediately, handling both user
+ * and kernel threads. Ensures proper cleanup of held resources (locks,
+ * semaphores) and wakes up any waiting threads before termination.
+ * 
+ * @param t Thread to terminate (must be in RUNNING state with force_exit flag set)
+ */
+static void terminate_thread_immediately(struct thread* t) {
+  ASSERT(intr_get_level() == INTR_OFF);
+  ASSERT(t != NULL);
+  ASSERT(t->force_exit == true);
+  ASSERT(is_thread(t));
+  ASSERT(t->status == THREAD_RUNNING);
+
+  if (t->pcb == NULL) {
+    thread_exit();
+    NOT_REACHED();
+  }
+
+  release_thread_resources(t);
+#ifdef THREADS
+  if (is_main_thread(t, t->pcb)) {
+    pthread_exit_main();
+  } else {
+    pthread_exit();
+  }
+#else
+  thread_exit();
+#endif
+
+  NOT_REACHED();
+}
+
+/**
+ * @brief Releases all resources held by a thread and wakes up waiters.
+ * 
+ * Cleans up all locks and other synchronization primitives held by the
+ * specified thread. Unblocks any threads waiting on these resources to
+ * prevent deadlocks during forced termination.
+ * 
+ * @param t Thread whose resources to release (must be valid and locked)
+ * 
+ * @pre Interrupts are disabled (INTR_OFF)
+ * @pre t != NULL
+ * @pre t is a valid thread (is_thread(t) == true)
+ */
+static void release_thread_resources(struct thread* t) {
+  ASSERT(intr_get_level() == INTR_OFF);
+  ASSERT(t != NULL);
+  ASSERT(is_thread(t));
+
+  // Unblock threads waiting for this thread's current lock
+  if (t->waiting_lock != NULL) {
+    while (!list_empty(&t->waiting_lock->semaphore.waiters)) {
+      struct thread* waiter =
+          list_entry(list_pop_front(&t->waiting_lock->semaphore.waiters), struct thread, elem);
+      thread_unblock(waiter);
+    }
+    t->waiting_lock = NULL;
+  }
+
+  // Release all locks held by this thread and wake their waiters
+  while (!list_empty(&t->held_locks)) {
+    struct list_elem* e = list_pop_front(&t->held_locks);
+    struct lock* l = list_entry(e, struct lock, elem);
+
+    // Wake up all threads waiting for this lock
+    while (!list_empty(&l->semaphore.waiters)) {
+      struct thread* waiter =
+          list_entry(list_pop_front(&l->semaphore.waiters), struct thread, elem);
+      thread_unblock(waiter);
+    }
+
+    // Properly release the lock
+    lock_release(l);
   }
 }

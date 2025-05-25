@@ -127,7 +127,7 @@ uint32_t sys_write(uint32_t* args) {
 uint32_t sys_exit(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int exit_code = (int)args[0];
-  thread_terminate(exit_code);
+  process_exit_with_status(exit_code);
   NOT_REACHED();
 }
 
@@ -421,13 +421,13 @@ uint32_t sys_get_tid(uint32_t* args UNUSED) {
  */
 static void validate_buffer_in_user_region(const void* buffer, size_t size) {
   if (buffer == NULL || !is_user_vaddr(buffer)) {
-    thread_terminate(-1);
+    process_exit_with_status(-1);
   }
 
   // Check if the buffer is within the user address space.
   size_t delta = PHYS_BASE - buffer;
   if (size > delta) {
-    thread_terminate(-1);
+    process_exit_with_status(-1);
   }
 
   // Check all pages in the buffer.
@@ -435,7 +435,7 @@ static void validate_buffer_in_user_region(const void* buffer, size_t size) {
 
   for (void* p = pg_round_down(buffer); p <= buffer_end_pg; p += PGSIZE) {
     if (!pagedir_get_page(thread_current()->pcb->pagedir, p)) {
-      thread_terminate(-1);
+      process_exit_with_status(-1);
     }
   }
 }
@@ -447,7 +447,7 @@ static void validate_buffer_in_user_region(const void* buffer, size_t size) {
  */
 static void validate_string_in_user_region(const char* string) {
   if (string == NULL || !is_user_vaddr(string)) {
-    thread_terminate(-1);
+    process_exit_with_status(-1);
   }
 
   size_t delta = PHYS_BASE - (const void*)string;
@@ -455,7 +455,7 @@ static void validate_string_in_user_region(const char* string) {
   // We cannot check the mapped pages, so when strnlen find a page fault, kernel will
   // go to the `page_fault()` handler. We let the `page_fault()` handler to handle the error.
   if (strnlen(string, delta) == delta) {
-    thread_terminate(-1);
+    process_exit_with_status(-1);
   }
 }
 

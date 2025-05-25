@@ -106,6 +106,7 @@ struct process {
   Stack_manager stack_manager;       /* Stack manager for this process */
   struct lock* user_locks[MAX_SYNC]; /* User locks for this process */
   struct semaphore* user_semaphores[MAX_SYNC]; /* User semaphores for this process */
+  bool set_exit_code;                          /* If true, the process has set an exit code */
 };
 
 void userprog_init(void);
@@ -114,6 +115,7 @@ pid_t process_execute(const char* cmd);
 int process_wait(pid_t);
 void process_exit(void);
 void process_activate(void);
+void process_exit_with_status(int exit_code);
 pid_t process_fork(const struct intr_frame* if_);
 
 bool is_main_thread(struct thread*, struct process*);
