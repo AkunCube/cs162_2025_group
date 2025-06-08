@@ -21,10 +21,10 @@ static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
 static struct file* validate_file_descriptor(int fd);
 static int fd_alloc(struct process* pcb);
-static struct lock fileop_lock;
+// static struct lock fileop_lock;
 void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
-  lock_init(&fileop_lock);
+  // lock_init(&fileop_lock);
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
@@ -75,9 +75,7 @@ uint32_t sys_write(uint32_t* args) {
   }
 
   if (fd == STDOUT_FILENO) {
-    lock_acquire(&fileop_lock);
     putbuf(buffer, size);
-    lock_release(&fileop_lock);
     return size;
   } else if (fd == STDIN_FILENO) {
     return -1;
@@ -86,9 +84,8 @@ uint32_t sys_write(uint32_t* args) {
     if (of == NULL) {
       return -1;
     }
-    lock_acquire(&fileop_lock);
+
     off_t bytes_written = file_write(of, buffer, size);
-    lock_release(&fileop_lock);
     return bytes_written;
   }
 
@@ -132,9 +129,7 @@ uint32_t sys_create(uint32_t* args) {
   unsigned initial_size = (unsigned)args[1];
   validate_string_in_user_region((const char*)args[0]);
 
-  lock_acquire(&fileop_lock);
   bool success = filesys_create(file_name, initial_size);
-  lock_release(&fileop_lock);
 
   return success;
 }
@@ -145,10 +140,7 @@ uint32_t sys_open(uint32_t* args) {
   validate_string_in_user_region(file_name);
 
   struct file* of = NULL;
-  lock_acquire(&fileop_lock);
   of = filesys_open(file_name);
-  lock_release(&fileop_lock);
-
   if (of == NULL) {
     return -1;
   }
@@ -169,9 +161,7 @@ uint32_t sys_filesize(uint32_t* args) {
     return -1;
   }
 
-  lock_acquire(&fileop_lock);
   off_t size = file_length(of);
-  lock_release(&fileop_lock);
   return size;
 }
 
@@ -188,23 +178,23 @@ uint32_t sys_read(uint32_t* args) {
   if (fd == STDIN_FILENO) {
     unsigned i = 0;
     uint8_t ch;
-    lock_acquire(&fileop_lock);
+
     for (i = 0; i < size; ++i) {
       ch = buffer[i] = input_getc();
       if (ch == '\n') {
         break;
       }
     }
-    lock_release(&fileop_lock);
+
     return i;
   } else {
     struct file* of = thread_current()->pcb->ofile[fd];
     if (of == NULL) {
       return -1;
     }
-    lock_acquire(&fileop_lock);
+
     off_t bytes_read = file_read(of, buffer, size);
-    lock_release(&fileop_lock);
+
     return bytes_read;
   }
 }
@@ -217,10 +207,9 @@ uint32_t sys_close(uint32_t* args) {
   if (of == NULL) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
+
   file_close(of);
   thread_current()->pcb->ofile[fd] = NULL;
-  lock_release(&fileop_lock);
   return 0;
 }
 
@@ -232,9 +221,7 @@ uint32_t sys_tell(uint32_t* args) {
   if (of == NULL) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
   off_t res = file_tell(of);
-  lock_release(&fileop_lock);
   return res;
 }
 
@@ -247,9 +234,8 @@ uint32_t sys_seek(uint32_t* args) {
   if (of == NULL) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
+
   file_seek(of, position);
-  lock_release(&fileop_lock);
   return 0;
 }
 
@@ -258,9 +244,7 @@ uint32_t sys_remove(uint32_t* args) {
   const char* file_name = (const char*)args[0];
   validate_string_in_user_region(file_name);
 
-  lock_acquire(&fileop_lock);
   bool success = filesys_remove(file_name);
-  lock_release(&fileop_lock);
   return success;
 }
 
