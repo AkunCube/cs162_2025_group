@@ -8,16 +8,25 @@
 #include "filesys/cache.h"
 #include "threads/malloc.h"
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
+
+#define DIRECT_POINTERS 120   /* Number of direct pointers in inode. */
+#define INDIRECT_POINTERS 128 /* Number of pointers in an indirect block. */
+
+#define MAX_TMP_SECTORS 130 /* Maximum number of sectors for temporary storage. */
 
 /* On-disk inode.
    Must be exactly BLOCK_SECTOR_SIZE bytes long. */
 struct inode_disk {
-  block_sector_t start; /* First data sector. */
-  off_t length;         /* File size in bytes. */
-  unsigned magic;       /* Magic number. */
-  uint32_t unused[125]; /* Not used. */
+  block_sector_t direct[DIRECT_POINTERS]; /* Direct pointers to data sectors. */
+  block_sector_t indirect;                /* Indirect pointer to data sectors. */
+  block_sector_t doubly_indirect;         /* Doubly indirect pointer to data sectors. */
+  off_t length;                           /* File size in bytes. */
+  unsigned magic;                         /* Magic number. */
+  uint32_t unused[4];                     /* Unused space for future expansion. */
 };
 
 /* Returns the number of sectors to allocate for an inode SIZE
@@ -40,10 +49,40 @@ struct inode {
    POS. */
 static block_sector_t byte_to_sector(const struct inode* inode, off_t pos) {
   ASSERT(inode != NULL);
-  if (pos < inode->data.length)
-    return inode->data.start + pos / BLOCK_SECTOR_SIZE;
-  else
+
+  if (pos >= inode->data.length) {
     return -1;
+  }
+
+  size_t sector = pos / BLOCK_SECTOR_SIZE;
+
+  if (sector < DIRECT_POINTERS) {
+    /* Direct pointers. */
+    return inode->data.direct[sector];
+  }
+
+  sector -= DIRECT_POINTERS;
+
+  if (sector < INDIRECT_POINTERS) {
+    /* Indirect pointers. */
+    block_sector_t indirect_block;
+    read_from_cache(inode->data.indirect, &indirect_block, sector * sizeof(block_sector_t),
+                    sizeof(block_sector_t));
+    return indirect_block;
+  }
+
+  // Doubly indirect pointers.
+  sector -= INDIRECT_POINTERS;
+  size_t first_level = sector / INDIRECT_POINTERS;
+  size_t second_level = sector % INDIRECT_POINTERS;
+
+  block_sector_t first_level_sector;
+  block_sector_t data_sector;
+  read_from_cache(inode->data.doubly_indirect, &first_level_sector,
+                  first_level * sizeof(block_sector_t), sizeof(block_sector_t));
+  read_from_cache(first_level_sector, &data_sector, second_level * sizeof(block_sector_t),
+                  sizeof(block_sector_t));
+  return data_sector;
 }
 
 /* List of open inodes, so that opening a single inode twice
@@ -60,8 +99,6 @@ void inode_init(void) { list_init(&open_inodes); }
    Returns false if memory or disk allocation fails. */
 bool inode_create(block_sector_t sector, off_t length) {
   struct inode_disk* disk_inode = NULL;
-  bool success = false;
-
   ASSERT(length >= 0);
 
   /* If this assertion fails, the inode structure is not exactly
@@ -69,23 +106,138 @@ bool inode_create(block_sector_t sector, off_t length) {
   ASSERT(sizeof *disk_inode == BLOCK_SECTOR_SIZE);
 
   disk_inode = calloc(1, sizeof *disk_inode);
-  if (disk_inode != NULL) {
-    size_t sectors = bytes_to_sectors(length);
-    disk_inode->length = length;
-    disk_inode->magic = INODE_MAGIC;
-    if (free_map_allocate(sectors, &disk_inode->start)) {
-      write_to_cache(sector, disk_inode, 0, sizeof *disk_inode);
-      if (sectors > 0) {
-        static char zeros[BLOCK_SECTOR_SIZE];
-        size_t i;
 
-        for (i = 0; i < sectors; i++)
-          write_to_cache(disk_inode->start + i, zeros, 0, sizeof zeros);
-      }
-      success = true;
-    }
-    free(disk_inode);
+  if (disk_inode == NULL) {
+    return false; // Memory allocation failed.
   }
+
+  size_t sectors = bytes_to_sectors(length);
+  block_sector_t* sector_list = malloc((sector + MAX_TMP_SECTORS) * sizeof(block_sector_t));
+
+  if (sector_list == NULL) {
+    free(disk_inode);
+    return false;
+  }
+
+  // Initialize the inode structure.
+  disk_inode->length = length;
+  disk_inode->magic = INODE_MAGIC;
+
+  size_t allocated = 0;          // Number of sectors allocated for the inode.
+  size_t total_needed = 0;       // Total sectors needed for the inode.
+  size_t remaining = 0;          // Remaining sectors after direct and indirect pointers.
+  size_t first_level_blocks = 0; // Number of first-level blocks for doubly indirect pointers.
+
+  if (sectors <= DIRECT_POINTERS) {
+    total_needed = sectors;
+  } else if (sectors <= (DIRECT_POINTERS + INDIRECT_POINTERS)) {
+    total_needed = sectors + 1;
+  } else {
+    remaining = sectors - DIRECT_POINTERS - INDIRECT_POINTERS;
+    first_level_blocks = DIV_ROUND_UP(remaining, INDIRECT_POINTERS);
+    total_needed = sectors + 2 + first_level_blocks;
+  }
+
+  bool success = false; // Indicates if the inode creation was successful.
+
+  // Alloc all sectors needed for the inode.
+  for (size_t i = 0; i < total_needed; ++i, ++allocated) {
+    if (!free_map_allocate(1, &sector_list[allocated])) {
+      goto cleanup;
+    }
+  }
+
+  size_t sector_index = 0;
+
+  // Fill in the direct pointers.
+  for (size_t i = 0; i < DIRECT_POINTERS && i < sectors; ++i) {
+    disk_inode->direct[i] = sector_list[sector_index++];
+  }
+
+  // Fill in the indirect pointer if needed.
+  if (sectors > DIRECT_POINTERS) {
+    disk_inode->indirect = sector_list[sector_index++];
+    block_sector_t* indirect_block = calloc(1, BLOCK_SECTOR_SIZE);
+    if (indirect_block == NULL) {
+      goto cleanup;
+    }
+    size_t indirect_sectors = MIN(sectors - DIRECT_POINTERS, INDIRECT_POINTERS);
+    for (size_t i = 0; i < indirect_sectors; i++) {
+      indirect_block[i] = sector_list[sector_index++];
+    }
+    write_to_cache(disk_inode->indirect, indirect_block, 0, BLOCK_SECTOR_SIZE);
+    free(indirect_block);
+  }
+
+  // Fill in the doubly indirect pointer if needed.
+  if (sectors > (DIRECT_POINTERS + INDIRECT_POINTERS)) {
+    disk_inode->doubly_indirect = sector_list[sector_index++];
+    ASSERT(remaining != 0 && first_level_blocks != 0);
+    block_sector_t* first_level_block = calloc(1, BLOCK_SECTOR_SIZE);
+    if (first_level_block == NULL) {
+      goto cleanup;
+    }
+    block_sector_t* second_level_block = calloc(1, BLOCK_SECTOR_SIZE);
+    if (second_level_block == NULL) {
+      free(first_level_block);
+      goto cleanup;
+    }
+
+    for (size_t i = 0; i < first_level_blocks; i++) {
+      block_sector_t first_level_sector = sector_list[sector_index++];
+      first_level_block[i] = first_level_sector;
+      size_t data_sectors_in_this_block = MIN(INDIRECT_POINTERS, remaining - i * INDIRECT_POINTERS);
+      for (size_t j = 0; j < data_sectors_in_this_block; j++) {
+        second_level_block[j] = sector_list[sector_index++];
+      }
+      write_to_cache(first_level_sector, second_level_block, 0, BLOCK_SECTOR_SIZE);
+      memset(second_level_block, 0,
+             BLOCK_SECTOR_SIZE); // Clear the second level block for next use.
+    }
+    write_to_cache(disk_inode->doubly_indirect, first_level_block, 0, BLOCK_SECTOR_SIZE);
+    free(first_level_block);
+    free(second_level_block);
+  }
+
+  // Initialize all data sectors to zero.
+  static uint8_t zeros[BLOCK_SECTOR_SIZE];
+
+  for (size_t i = 0; i < sectors; ++i) {
+    block_sector_t data_sector;
+    if (i < DIRECT_POINTERS) {
+      data_sector = disk_inode->direct[i];
+    } else if (i < (DIRECT_POINTERS + INDIRECT_POINTERS)) {
+      size_t offset = i - DIRECT_POINTERS;
+      read_from_cache(disk_inode->indirect, &data_sector, offset * sizeof(block_sector_t),
+                      sizeof(block_sector_t));
+    } else {
+      size_t offest = i - (DIRECT_POINTERS + INDIRECT_POINTERS);
+      size_t first_level = offest / INDIRECT_POINTERS;
+      size_t second_level = offest % INDIRECT_POINTERS;
+      block_sector_t first_level_sector;
+      // Read the first level sector from the doubly indirect block.
+      read_from_cache(disk_inode->doubly_indirect, &first_level_sector,
+                      first_level * sizeof(block_sector_t), sizeof(block_sector_t));
+      // Read the second level sector from the first level block.
+      read_from_cache(first_level_sector, &data_sector, second_level * sizeof(block_sector_t),
+                      sizeof(block_sector_t));
+    }
+
+    write_to_cache(data_sector, zeros, 0, BLOCK_SECTOR_SIZE);
+  }
+
+  // Finally, write the inode to disk.
+  write_to_cache(sector, disk_inode, 0, BLOCK_SECTOR_SIZE);
+  success = true;
+
+cleanup:
+  if (!success) {
+    for (size_t i = 0; i < allocated; i++) {
+      free_map_release(sector_list[i], 1);
+    }
+  }
+  free(disk_inode);
+  free(sector_list);
   return success;
 }
 
@@ -138,19 +290,63 @@ void inode_close(struct inode* inode) {
   if (inode == NULL)
     return;
 
-  /* Release resources if this was the last opener. */
-  if (--inode->open_cnt == 0) {
-    /* Remove from inode list and release lock. */
-    list_remove(&inode->elem);
+  if (--inode->open_cnt > 0)
+    return;
 
-    /* Deallocate blocks if removed. */
-    if (inode->removed) {
-      free_map_release(inode->sector, 1);
-      free_map_release(inode->data.start, bytes_to_sectors(inode->data.length));
-    }
+  list_remove(&inode->elem);
 
+  if (!inode->removed) {
     free(inode);
+    return;
   }
+
+  size_t remaining = DIV_ROUND_UP(inode->data.length, BLOCK_SECTOR_SIZE);
+
+  {
+    size_t const direct_pointers = MIN(DIRECT_POINTERS, remaining);
+    for (size_t i = 0; i < direct_pointers; ++i) {
+      free_map_release(inode->data.direct[i], 1);
+    }
+    remaining -= direct_pointers;
+  }
+
+  // Free indirect pointer if it exists.
+  if (remaining > 0) {
+    static block_sector_t indirect_block[INDIRECT_POINTERS];
+    read_from_cache(inode->data.indirect, indirect_block, 0, BLOCK_SECTOR_SIZE);
+
+    size_t const indirect_pointers = MIN(INDIRECT_POINTERS, remaining);
+    for (size_t i = 0; i < indirect_pointers; ++i) {
+      free_map_release(indirect_block[i], 1);
+    }
+    free_map_release(inode->data.indirect, 1);
+    remaining -= indirect_pointers;
+  }
+
+  // Free doubly indirect pointer if it exists.
+  if (remaining > 0) {
+    static block_sector_t first_level_block[INDIRECT_POINTERS];
+    read_from_cache(inode->data.doubly_indirect, first_level_block, 0, BLOCK_SECTOR_SIZE);
+
+    size_t first_level = ROUND_UP(remaining, INDIRECT_POINTERS);
+    for (size_t i = 0; i < first_level; ++i) {
+      static block_sector_t second_level_block[INDIRECT_POINTERS];
+      read_from_cache(first_level_block[i], second_level_block, 0, BLOCK_SECTOR_SIZE);
+
+      size_t const second_level_pointers = MIN(INDIRECT_POINTERS, remaining);
+      for (size_t j = 0; j < second_level_pointers; ++j) {
+        free_map_release(second_level_block[j], 1);
+      }
+      free_map_release(first_level_block[i], 1);
+      remaining -= second_level_pointers;
+    }
+    free_map_release(inode->data.doubly_indirect, 1);
+  }
+
+  ASSERT(remaining == 0); // All sectors should be freed.
+
+  free(inode);
+  return;
 }
 
 /* Marks INODE to be deleted when it is closed by the last caller who
@@ -215,6 +411,8 @@ off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t
   while (size > 0) {
     /* Sector to write, starting byte offset within sector. */
     block_sector_t sector_idx = byte_to_sector(inode, offset);
+    // TODO: Handle the case where sector_idx is -1 (not found).
+    ASSERT(sector_idx != (block_sector_t)-1);
     int sector_ofs = offset % BLOCK_SECTOR_SIZE;
 
     /* Bytes left in inode, bytes left in sector, lesser of the two. */
