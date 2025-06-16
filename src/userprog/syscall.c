@@ -87,6 +87,10 @@ uint32_t sys_write(uint32_t* args) {
       return -1;
     }
 
+    if (file_isdir(of)) {
+      return -1; // Cannot write to a directory.
+    }
+
     off_t bytes_written = file_write(of, buffer, size);
     return bytes_written;
   }
@@ -193,6 +197,10 @@ uint32_t sys_read(uint32_t* args) {
     struct file* of = thread_current()->pcb->ofile[fd];
     if (of == NULL) {
       return -1;
+    }
+
+    if (file_isdir(of)) {
+      return -1; // Cannot read from a directory.
     }
 
     off_t bytes_read = file_read(of, buffer, size);
