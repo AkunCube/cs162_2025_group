@@ -90,6 +90,7 @@ void userprog_init(void) {
   t->pcb->pid = get_pid(t->pcb);
   t->pcb->ppid = -1;
   t->pcb->elf_file = NULL;
+  t->pcb->cwd_inode_sector = ROOT_DIR_SECTOR; // Start with root directory
   list_init(&t->pcb->children);
 }
 
@@ -180,6 +181,7 @@ static void start_process(void* sargs) {
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
+    t->pcb->cwd_inode_sector = parent->cwd_inode_sector; // Inherit parent's cwd
     list_init(&t->pcb->children);
     // Clear the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
@@ -868,6 +870,7 @@ static void perform_fork_operations(void* args) {
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
+    t->pcb->cwd_inode_sector = parent->cwd_inode_sector;
     list_init(&t->pcb->children);
     // Copy the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
@@ -923,3 +926,27 @@ static void perform_fork_operations(void* args) {
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&cur_if) : "memory");
   NOT_REACHED();
 }
+
+/**
+ * @brief Retrieves and opens the current working directory of a process.
+ * 
+ * Returns an open directory handle for the process's CWD, 
+ * using its stored inode sector number. Caller must close the directory.
+ * 
+ * @param process The target process.
+ * @return Open directory handle, or NULL on error.
+ */
+struct dir* process_cwd(struct process* process) {
+  ASSERT(process != NULL);
+  return dir_open(inode_open(process->cwd_inode_sector, FILE_TYPE_DIR));
+}
+
+/**
+ * @brief Sets the current working directory (CWD) for the calling thread's process.
+ * 
+ * Updates the process's CWD to the specified inode sector.
+ * Caller must ensure the sector corresponds to a valid directory inode.
+ * 
+ * @param sector The inode sector number of the new CWD.
+ */
+void process_set_cwd(block_sector_t sector) { thread_current()->pcb->cwd_inode_sector = sector; }

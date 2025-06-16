@@ -16,6 +16,7 @@ struct dir {
 struct dir_entry {
   block_sector_t inode_sector; /* Sector number of header. */
   char name[NAME_MAX + 1];     /* Null terminated file name. */
+  enum file_type type;         /* Type of the file (file or directory). */
   bool in_use;                 /* In use or free? */
 };
 
@@ -43,7 +44,7 @@ struct dir* dir_open(struct inode* inode) {
 /* Opens the root directory and returns a directory for it.
    Return true if successful, false on failure. */
 struct dir* dir_open_root(void) {
-  return dir_open(inode_open(ROOT_DIR_SECTOR));
+  return dir_open(inode_open(ROOT_DIR_SECTOR, FILE_TYPE_DIR));
 }
 
 /* Opens and returns a new directory for the same inode as DIR.
@@ -99,7 +100,7 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
   ASSERT(name != NULL);
 
   if (lookup(dir, name, &e, NULL))
-    *inode = inode_open(e.inode_sector);
+    *inode = inode_open(e.inode_sector, e.type);
   else
     *inode = NULL;
 
@@ -112,7 +113,7 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
    Returns true if successful, false on failure.
    Fails if NAME is invalid (i.e. too long) or a disk or memory
    error occurs. */
-bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
+bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector, enum file_type type) {
   struct dir_entry e;
   off_t ofs;
   bool success = false;
@@ -143,6 +144,7 @@ bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   e.in_use = true;
   strlcpy(e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
+  e.type = type;
   success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
 
 done:
@@ -166,7 +168,7 @@ bool dir_remove(struct dir* dir, const char* name) {
     goto done;
 
   /* Open inode. */
-  inode = inode_open(e.inode_sector);
+  inode = inode_open(e.inode_sector, e.type);
   if (inode == NULL)
     goto done;
 

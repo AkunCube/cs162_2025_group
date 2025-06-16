@@ -19,5 +19,9 @@ uint32_t sys_tell(uint32_t*);
 uint32_t sys_seek(uint32_t*);
 uint32_t sys_remove(uint32_t*);
 uint32_t sys_compute_e(uint32_t*);
+uint32_t sys_inumber(uint32_t*);
+uint32_t sys_mkdir(uint32_t*);
+uint32_t sys_isdir(uint32_t*);
+uint32_t sys_chdir(uint32_t*);
 
 #endif /* userprog/syscall.h */

@@ -28,11 +28,13 @@ void syscall_init(void) {
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_WRITE] = sys_write,     [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,       [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,   [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,       [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek,       [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_INUMBER] = sys_inumber, [SYS_MKDIR] = sys_mkdir,       [SYS_ISDIR] = sys_isdir,
+    [SYS_CHDIR] = sys_chdir,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -252,6 +254,46 @@ uint32_t sys_compute_e(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int n = (int)args[0];
   return sys_sum_to_e(n);
+}
+
+uint32_t sys_inumber(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+
+  struct file* of = validate_file_descriptor(fd);
+  if (of == NULL) {
+    return -1;
+  }
+
+  return file_get_inumber(of);
+}
+
+uint32_t sys_mkdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* dir_name = (const char*)args[0];
+  validate_string_in_user_region(dir_name);
+
+  return filesys_mkdir(dir_name);
+}
+
+uint32_t sys_chdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* dir_name = (const char*)args[0];
+  validate_string_in_user_region(dir_name);
+
+  return filesys_chdir(dir_name);
+}
+
+uint32_t sys_isdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+
+  struct file* of = validate_file_descriptor(fd);
+  if (of == NULL) {
+    return -1;
+  }
+
+  return file_isdir(of);
 }
 
 /********************************************************/

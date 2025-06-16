@@ -45,6 +45,7 @@ struct inode {
   int deny_write_cnt;     /* 0: writes ok, >0: deny writes. */
   struct lock lock;       /* Lock for synchronizing access. */
   struct inode_disk data; /* Inode content. */
+  enum file_type type;    /* Type of the file (file or directory). */
 };
 
 static bool extend_file_sectors(struct inode_disk* disk_inode, off_t offset, off_t length);
@@ -170,7 +171,7 @@ bool inode_create(block_sector_t sector, off_t length) {
 /* Reads an inode from SECTOR
    and returns a `struct inode' that contains it.
    Returns a null pointer if memory allocation fails. */
-struct inode* inode_open(block_sector_t sector) {
+struct inode* inode_open(block_sector_t sector, enum file_type type) {
   struct list_elem* e;
   struct inode* inode;
 
@@ -194,6 +195,7 @@ struct inode* inode_open(block_sector_t sector) {
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
+  inode->type = type;
   lock_init(&inode->lock);
   read_from_cache(inode->sector, &inode->data, 0, BLOCK_SECTOR_SIZE);
   return inode;
@@ -674,4 +676,9 @@ static bool initialize_sectors_to_zeros(struct inode_disk* disk_inode, off_t sta
   // Clean up resources.
   free(double_indirect_cache);
   return true;
+}
+
+bool inode_isdir(const struct inode* inode) {
+  ASSERT(inode != NULL);
+  return inode->type == FILE_TYPE_DIR;
 }
