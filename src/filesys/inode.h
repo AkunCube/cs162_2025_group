@@ -6,11 +6,7 @@
 #include "devices/block.h"
 
 struct bitmap;
-
-enum file_type {
-  FILE_TYPE_FILE, // Normal file
-  FILE_TYPE_DIR,  // Dir
-};
+enum file_type;
 
 void inode_init(void);
 bool inode_create(block_sector_t, off_t);
@@ -26,5 +22,6 @@ void inode_allow_write(struct inode*);
 off_t inode_length(const struct inode*);
 
 bool inode_isdir(const struct inode* inode);
+void increment_dir_entry_count(struct inode* inode, uint32_t num);
 
 #endif /* filesys/inode.h */

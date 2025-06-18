@@ -10,6 +10,7 @@
 #include "threads/malloc.h"
 #include "threads/thread.h"
 #include "userprog/process.h"
+#include "filesys/abstract-file.h"
 #include <string.h>
 
 /* Partition that contains the file system. */
@@ -21,6 +22,8 @@ static struct dir* setup_directory_context(const char* path, char** path_copy);
 static bool create_final_component(char* path, struct dir* current_dir, off_t initial_size,
                                    enum file_type type);
 static struct inode* resolve_last_path_component(struct dir* current_dir, char* path);
+static void initialize_dir_special_entries(struct dir* dir, block_sector_t current_inode_sector,
+                                           block_sector_t parent_inode_sector);
 
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system. */
@@ -60,12 +63,15 @@ bool filesys_create(const char* path, off_t initial_size) {
   return success;
 }
 
-/* Opens the file with the given NAME.
-   Returns the new file if successful or a null pointer
-   otherwise.
-   Fails if no file named NAME exists,
-   or if an internal memory allocation fails. */
-struct file* filesys_open(const char* name) {
+/**
+ * @brief Opens a file or directory by path and returns an abstract file handle.
+ * Resolves the path, checks file type (regular file or directory), 
+ * and initializes the appropriate abstract file structure.
+ * @param name Path of the file or directory to open.
+ * @return struct abstract_file* Pointer to the initialized abstract file on success, 
+ *                              NULL on failure (e.g., path not found, permission denied).
+ */
+struct abstract_file* filesys_open(const char* name) {
   char* path_copy = NULL;
   struct dir* current_dir = setup_directory_context(name, &path_copy);
   if (!current_dir) {
@@ -75,7 +81,15 @@ struct file* filesys_open(const char* name) {
   struct inode* inode = resolve_last_path_component(current_dir, path_copy);
 
   free(path_copy);
-  return file_open(inode);
+  if (inode == NULL) {
+    return NULL;
+  }
+
+  if (inode_isdir(inode)) {
+    return to_af(dir_open(inode));
+  } else {
+    return to_af(file_open(inode));
+  }
 }
 
 /**
@@ -157,11 +171,15 @@ static inline bool path_is_absolute(const char* path) {
 }
 
 /**
- * @brief Set the up directory context object
+ * @brief Sets up the directory context for path resolution and returns the initial directory.
  * 
- * @param path 
- * @param path_copy 
- * @return struct dir* 
+ * Creates a copy of the input path, processes it to determine the starting directory 
+ * (root for absolute paths or current working directory for relative paths), and returns 
+ * the directory context. The path copy is stored at the provided pointer for subsequent use.
+ * 
+ * @param path The input path to process (absolute or relative).
+ * @param path_copy Pointer to store the copied and trimmed path string.
+ * @return struct dir* A pointer to the initial directory context, or NULL on failure.
  */
 static struct dir* setup_directory_context(const char* path, char** path_copy) {
   ASSERT(path != NULL);
@@ -202,10 +220,10 @@ static struct dir* setup_directory_context(const char* path, char** path_copy) {
  * 
  * This function assumes all intermediate directories in the path already exist.
  * It will only create the final component if it does not already exist.
- * The parent_dir context is automatically closed after the operation.
+ * The current_dir context is automatically closed after the operation.
  * 
  * @param path The full path including the final component to create.
- * @param parent_dir The directory context of the parent directory.
+ * @param current_dir The directory context of the parent directory.
  * @param initial_size The initial size for the created file (ignored for directories).
  * @param type The type of the final component (FILE_TYPE_DIR or FILE_TYPE_FILE).
  * @return true if the final component was created or already exists, false on error.
@@ -254,6 +272,8 @@ static bool create_final_component(char* path, struct dir* current_dir, off_t in
       break;
     }
 
+    increment_dir_entry_count(dir_get_inode(current_dir), 1);
+
     if (type != FILE_TYPE_DIR) {
       success = true; // Non-directory types are created directly.
       break;
@@ -266,8 +286,8 @@ static bool create_final_component(char* path, struct dir* current_dir, off_t in
       break;
     }
     // Self and parent references.
-    dir_add(new_dir, ".", inode_sector, FILE_TYPE_DIR);
-    dir_add(new_dir, "..", inode_get_inumber(dir_get_inode(current_dir)), FILE_TYPE_DIR);
+    initialize_dir_special_entries(new_dir, inode_sector,
+                                   inode_get_inumber(dir_get_inode(current_dir)));
     dir_close(new_dir);
     success = true;
   }
@@ -282,6 +302,7 @@ static bool create_final_component(char* path, struct dir* current_dir, off_t in
  * Traverses the path component by component, ensuring each intermediate 
  * component is a directory, and returns the inode of the final component.
  * If any intermediate component is not a directory or does not exist, returns NULL.
+ * The current_dir context is automatically closed after the operation.
  * 
  * @param current_dir The starting directory context.
  * @param path The path to resolve, relative to current_dir.
@@ -293,9 +314,26 @@ static struct inode* resolve_last_path_component(struct dir* current_dir, char* 
   char *component, *save_ptr;
   struct inode* inode = NULL;
 
-  for (component = strtok_r(path, "/", &save_ptr); component != NULL;) {
+  if (strlen(path) == 0) {
+    goto cleanup;
+  }
+
+  component = strtok_r(path, "/", &save_ptr);
+  if (component == NULL) {
+    // Handle the edge case where the path is "/" or ends with "/".
+    // Since the caller has already opened the root directory
+    // (verified by path_is_absolute()), return its inode directly.
+    inode = inode_reopen(dir_get_inode(current_dir));
+    goto cleanup;
+  }
+
+  do {
     char* last_component = component;
     component = strtok_r(NULL, "/", &save_ptr);
+
+    if (strlen(last_component) == 0) {
+      continue;
+    }
 
     if (!dir_lookup(current_dir, last_component, &inode)) {
       // Component not found.
@@ -320,8 +358,43 @@ static struct inode* resolve_last_path_component(struct dir* current_dir, char* 
       inode = NULL;
       break;
     }
-  }
+  } while (component != NULL);
 
+cleanup:
   dir_close(current_dir);
   return inode;
+}
+
+/**
+ * @brief Initializes "." and ".." entries for a directory.
+ * @param dir The directory to initialize.
+ * @param current_inode_sector Inode sector for ".".
+ * @param parent_inode_sector Inode sector for "..".
+ */
+static void initialize_dir_special_entries(struct dir* dir, block_sector_t current_inode_sector,
+                                           block_sector_t parent_inode_sector) {
+  dir_add(dir, ".", current_inode_sector, FILE_TYPE_DIR);
+  dir_add(dir, "..", parent_inode_sector, FILE_TYPE_DIR);
+}
+
+/**
+ * @brief Retrieves the inode number from an abstract file object.
+ * @param af Pointer to the abstract file structure (file or directory).
+ * @return The inode number if valid, -1 if the input is NULL.
+ */
+int filesys_get_inumber(const struct abstract_file* af) {
+  if (af == NULL) {
+    return -1;
+  }
+
+  struct inode* inode = NULL;
+  if (abstract_file_is_file(af)) {
+    inode = file_get_inode(to_file(af));
+  } else if (abstract_file_is_dir(af)) {
+    inode = dir_get_inode(to_dir(af));
+  } else {
+    PANIC("Invalid abstract file type");
+  }
+
+  return inode_get_inumber(inode);
 }

@@ -6,6 +6,7 @@
 #include "threads/interrupt.h"
 #include "devices/block.h"
 #include "filesys/directory.h"
+#include "filesys/abstract-file.h"
 #include <stdint.h>
 
 // At most 8MB can be allocated to the stack
@@ -46,17 +47,17 @@ typedef struct {
    of the process, which is `special`. */
 struct process {
   /* Owned by process.c. */
-  pid_t pid;                         /* Process id*/
-  pid_t ppid;                        /* Parent process id*/
-  int exit_code;                     /* Process exit code */
-  uint32_t* pagedir;                 /* Page directory. */
-  char process_name[16];             /* Name of the main thread */
-  struct thread* main_thread;        /* Pointer to main thread */
-  struct file* ofile[MAX_OPEN_FILE]; /* Open-file table */
-  struct file* elf_file;             /* Current executable file */
-  Wait_status* wait_status;          /* Current process wait status, shared with its parent */
-  struct list children;              /* Current process spawnning children */
-  block_sector_t cwd_inode_sector;   /* Current working directory's inode sector */
+  pid_t pid;                                  /* Process id*/
+  pid_t ppid;                                 /* Parent process id*/
+  int exit_code;                              /* Process exit code */
+  uint32_t* pagedir;                          /* Page directory. */
+  char process_name[16];                      /* Name of the main thread */
+  struct thread* main_thread;                 /* Pointer to main thread */
+  struct abstract_file* ofile[MAX_OPEN_FILE]; /* Open-file table */
+  struct file* elf_file;                      /* Current executable file */
+  Wait_status* wait_status;        /* Current process wait status, shared with its parent */
+  struct list children;            /* Current process spawnning children */
+  block_sector_t cwd_inode_sector; /* Current working directory's inode sector */
 };
 
 void userprog_init(void);

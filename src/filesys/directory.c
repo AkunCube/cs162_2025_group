@@ -5,11 +5,13 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "filesys/abstract-file.h"
 
 /* A directory. */
 struct dir {
-  struct inode* inode; /* Backing store. */
-  off_t pos;           /* Current position. */
+  struct abstract_file af; /* Abstract file interface. */
+  struct inode* inode;     /* Backing store. */
+  off_t pos;               /* Current position. */
 };
 
 /* A single directory entry. */
@@ -31,6 +33,7 @@ bool dir_create(block_sector_t sector, size_t entry_cnt) {
 struct dir* dir_open(struct inode* inode) {
   struct dir* dir = calloc(1, sizeof *dir);
   if (inode != NULL && dir != NULL) {
+    dir->af.type = FILE_TYPE_DIR;
     dir->inode = inode;
     dir->pos = 0;
     return dir;
@@ -194,10 +197,13 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
 
   while (inode_read_at(dir->inode, &e, sizeof e, dir->pos) == sizeof e) {
     dir->pos += sizeof e;
-    if (e.in_use) {
-      strlcpy(name, e.name, NAME_MAX + 1);
-      return true;
-    }
+    if (!e.in_use)
+      continue; // Skip free entries.
+    if (!strcmp(e.name, ".") || !strcmp(e.name, ".."))
+      continue; // Skip special entries.
+
+    strlcpy(name, e.name, NAME_MAX + 1);
+    return true;
   }
   return false;
 }

@@ -22,6 +22,7 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "filesys/abstract-file.h"
 
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
@@ -444,11 +445,12 @@ bool load(const char** user_argv, int argc, void (**eip)(void), void** esp) {
   const char* file_name = user_argv[0];
 
   /* Open executable file. */
-  file = filesys_open(file_name);
-  if (file == NULL) {
+  struct abstract_file* af = filesys_open(file_name);
+  if (af == NULL || !abstract_file_is_file(af)) {
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
+  file = to_file(af);
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
@@ -827,11 +829,16 @@ static Wait_status* new_and_init_wait_status(pid_t pid) {
 static void handle_exit_close_files(struct thread* cur) {
   // Close all open files.
   for (int i = 2; i < MAX_OPEN_FILE; ++i) {
-    struct file* of = cur->pcb->ofile[i];
-    if (of != NULL) {
-      file_close(of);
-      cur->pcb->ofile[i] = NULL;
+    struct abstract_file* af = cur->pcb->ofile[i];
+    if (af == NULL) {
+      continue;
     }
+    if (abstract_file_is_dir(af)) {
+      dir_close(to_dir(af));
+    } else if (abstract_file_is_file(af)) {
+      file_close(to_file(af));
+    }
+    cur->pcb->ofile[i] = NULL;
   }
   // Close elf file.
   if (cur->pcb->elf_file != NULL) {
@@ -874,7 +881,13 @@ static void perform_fork_operations(void* args) {
     list_init(&t->pcb->children);
     // Copy the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
-      t->pcb->ofile[i] = share_file(parent->ofile[i]);
+      if (parent->ofile[i] == NULL) {
+        t->pcb->ofile[i] = NULL;
+        continue;
+      }
+      // TODO: support directories.
+      ASSERT(abstract_file_is_file(parent->ofile[i]));
+      t->pcb->ofile[i] = to_af(share_file(to_file(parent->ofile[i])));
     }
 
     t->pcb->elf_file = share_file(parent->elf_file);

@@ -8,6 +8,7 @@
 #include "filesys/cache.h"
 #include "threads/malloc.h"
 #include "threads/synch.h"
+#include "filesys/abstract-file.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -29,7 +30,8 @@ struct inode_disk {
   block_sector_t doubly_indirect;         /* Doubly indirect pointer to data sectors. */
   off_t length;                           /* File size in bytes. */
   unsigned magic;                         /* Magic number. */
-  uint32_t unused[4];                     /* Unused space for future expansion. */
+  uint32_t dir_entry_count;               /* Number of directory entries (for directories). */
+  uint32_t unused[3];                     /* Unused space for future expansion. */
 };
 
 /* Returns the number of sectors to allocate for an inode SIZE
@@ -151,6 +153,7 @@ bool inode_create(block_sector_t sector, off_t length) {
   // Initialize the inode structure.
   disk_inode->magic = INODE_MAGIC;
   disk_inode->length = 0;
+  disk_inode->dir_entry_count = 0;
 
   if (!extend_file_sectors(disk_inode, 0, length)) {
     return false;
@@ -681,4 +684,18 @@ static bool initialize_sectors_to_zeros(struct inode_disk* disk_inode, off_t sta
 bool inode_isdir(const struct inode* inode) {
   ASSERT(inode != NULL);
   return inode->type == FILE_TYPE_DIR;
+}
+
+/**
+ * @brief Increments the directory entry count in an inode and updates cache.
+ * @param inode The inode of the directory.
+ * @param num The number of entries to increment by.
+ */
+void increment_dir_entry_count(struct inode* inode, uint32_t num) {
+  ASSERT(inode_isdir(inode));
+  ASSERT(num != 0);
+
+  inode->data.dir_entry_count += num;
+  write_to_cache(inode->sector, &inode->data.dir_entry_count,
+                 offsetof(struct inode_disk, dir_entry_count), sizeof(uint32_t));
 }
