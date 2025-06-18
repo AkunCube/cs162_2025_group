@@ -19,5 +19,6 @@ bool filesys_remove(const char* name);
 bool filesys_mkdir(const char* name);
 bool filesys_chdir(const char* name);
 int filesys_get_inumber(const struct abstract_file* af);
+void filesys_close(struct abstract_file* af);
 
 #endif /* filesys/filesys.h */

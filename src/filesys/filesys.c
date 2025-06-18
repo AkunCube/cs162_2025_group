@@ -398,3 +398,18 @@ int filesys_get_inumber(const struct abstract_file* af) {
 
   return inode_get_inumber(inode);
 }
+
+/**
+ * @brief Closes an abstract file handle (either a regular file or directory).
+ * @param af Pointer to the abstract file structure to close. Must not be NULL.
+ */
+void filesys_close(struct abstract_file* af) {
+  ASSERT(af != NULL);
+  if (abstract_file_is_file(af)) {
+    file_close(to_file(af));
+  } else if (abstract_file_is_dir(af)) {
+    dir_close(to_dir(af));
+  } else {
+    PANIC("Invalid abstract file type passed to filesys_close()");
+  }
+}

@@ -833,11 +833,7 @@ static void handle_exit_close_files(struct thread* cur) {
     if (af == NULL) {
       continue;
     }
-    if (abstract_file_is_dir(af)) {
-      dir_close(to_dir(af));
-    } else if (abstract_file_is_file(af)) {
-      file_close(to_file(af));
-    }
+    filesys_close(af);
     cur->pcb->ofile[i] = NULL;
   }
   // Close elf file.

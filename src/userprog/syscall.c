@@ -207,11 +207,11 @@ uint32_t sys_close(uint32_t* args) {
   int fd = (int)args[0];
 
   struct abstract_file* af = validate_abstract_file_descriptor(fd);
-  if (af == NULL || !abstract_file_is_file(af)) {
+  if (af == NULL) {
     return -1;
   }
 
-  file_close(to_file(af));
+  filesys_close(af);
   thread_current()->pcb->ofile[fd] = NULL;
   return 0;
 }
