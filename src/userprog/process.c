@@ -959,3 +959,18 @@ struct dir* process_cwd(struct process* process) {
  * @param sector The inode sector number of the new CWD.
  */
 void process_set_cwd(block_sector_t sector) { thread_current()->pcb->cwd_inode_sector = sector; }
+
+/**
+ * @brief Checks if the current process's working directory matches the given sector.
+ 
+ * @param sector The inode sector number to compare against the current working directory.
+ * @return true if the current process's working directory matches the specified sector;
+ *         false if the process has no PCB or the sectors do not match.
+ */
+bool process_cwd_matches_sector(block_sector_t sector) {
+  struct thread* t = thread_current();
+  if (t->pcb == NULL) {
+    return false;
+  }
+  return t->pcb->cwd_inode_sector == sector;
+}

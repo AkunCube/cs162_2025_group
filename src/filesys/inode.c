@@ -686,6 +686,11 @@ bool inode_isdir(const struct inode* inode) {
   return inode->type == FILE_TYPE_DIR;
 }
 
+bool inode_isfile(const struct inode* inode) {
+  ASSERT(inode != NULL);
+  return inode->type == FILE_TYPE_FILE;
+}
+
 /**
  * @brief Increments the directory entry count in an inode and updates cache.
  * @param inode The inode of the directory.
@@ -698,4 +703,27 @@ void increment_dir_entry_count(struct inode* inode, uint32_t num) {
   inode->data.dir_entry_count += num;
   write_to_cache(inode->sector, &inode->data.dir_entry_count,
                  offsetof(struct inode_disk, dir_entry_count), sizeof(uint32_t));
+}
+
+void decrement_dir_entry_count(struct inode* inode, uint32_t num) {
+  ASSERT(inode_isdir(inode));
+  ASSERT(num != 0);
+  ASSERT(inode->data.dir_entry_count >= num);
+
+  inode->data.dir_entry_count -= num;
+  write_to_cache(inode->sector, &inode->data.dir_entry_count,
+                 offsetof(struct inode_disk, dir_entry_count), sizeof(uint32_t));
+}
+
+bool inode_directory_is_empty(const struct inode* inode) {
+  ASSERT(inode_isdir(inode));
+  return inode->data.dir_entry_count == 0;
+}
+
+int inode_get_open_count(struct inode* inode) {
+  ASSERT(inode != NULL);
+  lock_acquire(&inode->lock);
+  int open_count = inode->open_cnt;
+  lock_release(&inode->lock);
+  return open_count;
 }

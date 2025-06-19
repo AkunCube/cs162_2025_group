@@ -21,7 +21,8 @@ static inline bool path_is_absolute(const char* path);
 static struct dir* setup_directory_context(const char* path, char** path_copy);
 static bool create_final_component(char* path, struct dir* current_dir, off_t initial_size,
                                    enum file_type type);
-static struct inode* resolve_last_path_component(struct dir* current_dir, char* path);
+static struct inode* resolve_last_path_component(struct dir** current_dir_p, char* path,
+                                                 off_t* ofsp);
 static void initialize_dir_special_entries(struct dir* dir, block_sector_t current_inode_sector,
                                            block_sector_t parent_inode_sector);
 
@@ -78,8 +79,8 @@ struct abstract_file* filesys_open(const char* name) {
     return NULL;
   }
   ASSERT(path_copy != NULL);
-  struct inode* inode = resolve_last_path_component(current_dir, path_copy);
-
+  struct inode* inode = resolve_last_path_component(&current_dir, path_copy, /*ofsp=*/NULL);
+  dir_close(current_dir); // Close the directory context after resolving.
   free(path_copy);
   if (inode == NULL) {
     return NULL;
@@ -109,7 +110,8 @@ bool filesys_chdir(const char* path) {
   }
   ASSERT(path_copy != NULL);
 
-  struct inode* inode = resolve_last_path_component(current_dir, path_copy);
+  struct inode* inode = resolve_last_path_component(&current_dir, path_copy, /*ofsp=*/NULL);
+  dir_close(current_dir); // Close the directory context after resolving.
   bool success = inode != NULL && inode_isdir(inode);
 
   if (success) {
@@ -126,10 +128,19 @@ bool filesys_chdir(const char* path) {
    Fails if no file named NAME exists,
    or if an internal memory allocation fails. */
 bool filesys_remove(const char* name) {
-  struct dir* dir = dir_open_root();
-  bool success = dir != NULL && dir_remove(dir, name);
-  dir_close(dir);
+  char* path_copy = NULL;
+  struct dir* current_dir = setup_directory_context(name, &path_copy);
+  if (!current_dir) {
+    return false;
+  }
+  ASSERT(path_copy != NULL);
 
+  off_t ofs;
+  struct inode* inode = resolve_last_path_component(&current_dir, path_copy, /*ofsp=*/&ofs);
+  free(path_copy);
+
+  bool success = dir_remove(current_dir, inode, ofs);
+  dir_close(current_dir);
   return success;
 }
 
@@ -150,19 +161,29 @@ bool filesys_mkdir(const char* path) {
   }
   ASSERT(path_copy != NULL);
 
-  bool success = create_final_component(path_copy, current_dir, 0, FILE_TYPE_DIR);
+  // `2` means `.` and `..` entries will be created.
+  bool success =
+      create_final_component(path_copy, current_dir, 2 * dir_entry_size(), FILE_TYPE_DIR);
   free(path_copy);
   return success;
 }
 
 /* Formats the file system. */
 static void do_format(void) {
+#define ROOT_FILE_NUM 18
   printf("Formatting file system...");
   free_map_create();
-  if (!dir_create(ROOT_DIR_SECTOR, 16))
+  if (!dir_create(ROOT_DIR_SECTOR, ROOT_FILE_NUM))
     PANIC("root directory creation failed");
+  struct dir* root_dir = dir_open_root();
+  if (!root_dir)
+    PANIC("root directory open failed");
+  // Initialize the root directory with special entries.
+  initialize_dir_special_entries(root_dir, ROOT_DIR_SECTOR, ROOT_DIR_SECTOR);
+  dir_close(root_dir);
   free_map_close();
   printf("done.\n");
+#undef ROOT_FILE_NUM
 }
 
 static inline bool path_is_absolute(const char* path) {
@@ -240,7 +261,7 @@ static bool create_final_component(char* path, struct dir* current_dir, off_t in
     struct inode* inode = NULL;
 
     // Check if current component exists in the directory.
-    if (dir_lookup(current_dir, last_component, &inode)) {
+    if (dir_lookup(current_dir, last_component, &inode, NULL)) {
       // Fail if component exists but is not a directory.
       if (!inode_isdir(inode)) {
         inode_close(inode);
@@ -297,25 +318,36 @@ static bool create_final_component(char* path, struct dir* current_dir, off_t in
 }
 
 /**
- * @brief Finds the inode of the last component in a path within a directory context.
+ * @brief Resolves the final component of a path within a directory context, updating the directory pointer.
  * 
- * Traverses the path component by component, ensuring each intermediate 
- * component is a directory, and returns the inode of the final component.
- * If any intermediate component is not a directory or does not exist, returns NULL.
- * The current_dir context is automatically closed after the operation.
+ * Traverses the path component by component, ensuring each intermediate component is a directory.
+ * Returns the inode of the last component and updates the directory context to the parent of the final component.
+ * If 'ofsp' is provided, stores the offset of the final directory entry.
  * 
- * @param current_dir The starting directory context.
- * @param path The path to resolve, relative to current_dir.
- * @return The inode of the last component, or NULL on error.
+ * @param current_dir_p Pointer to the current directory context. Updated to the parent directory of the final component.
+ * @param path The path to resolve, relative to the initial directory context.
+ * @param ofsp Optional output parameter: stores the offset of the final directory entry if not NULL.
+ * @return The inode of the last component, or NULL if any intermediate component is not a directory or does not exist.
+ * 
+ * @note The directory context should be closed by the caller when done.
  */
-static struct inode* resolve_last_path_component(struct dir* current_dir, char* path) {
-  ASSERT(current_dir != NULL);
+static struct inode* resolve_last_path_component(struct dir** current_dir_p, char* path,
+                                                 off_t* ofsp) {
+  ASSERT(current_dir_p != NULL);
+  ASSERT(*current_dir_p != NULL);
   ASSERT(path != NULL);
+
+  struct dir* current_dir = *current_dir_p;
   char *component, *save_ptr;
   struct inode* inode = NULL;
 
+  if (ofsp != NULL) {
+    // Initialize offset if provided.
+    *ofsp = 0;
+  }
+
   if (strlen(path) == 0) {
-    goto cleanup;
+    goto done;
   }
 
   component = strtok_r(path, "/", &save_ptr);
@@ -324,7 +356,7 @@ static struct inode* resolve_last_path_component(struct dir* current_dir, char* 
     // Since the caller has already opened the root directory
     // (verified by path_is_absolute()), return its inode directly.
     inode = inode_reopen(dir_get_inode(current_dir));
-    goto cleanup;
+    goto done;
   }
 
   do {
@@ -335,7 +367,7 @@ static struct inode* resolve_last_path_component(struct dir* current_dir, char* 
       continue;
     }
 
-    if (!dir_lookup(current_dir, last_component, &inode)) {
+    if (!dir_lookup(current_dir, last_component, &inode, ofsp)) {
       // Component not found.
       break;
     }
@@ -360,8 +392,8 @@ static struct inode* resolve_last_path_component(struct dir* current_dir, char* 
     }
   } while (component != NULL);
 
-cleanup:
-  dir_close(current_dir);
+done:
+  *current_dir_p = current_dir; // Update the caller's directory context.
   return inode;
 }
 
@@ -373,8 +405,9 @@ cleanup:
  */
 static void initialize_dir_special_entries(struct dir* dir, block_sector_t current_inode_sector,
                                            block_sector_t parent_inode_sector) {
-  dir_add(dir, ".", current_inode_sector, FILE_TYPE_DIR);
-  dir_add(dir, "..", parent_inode_sector, FILE_TYPE_DIR);
+  //! IMPORTANT: Caller should as least ensure the size of dir can accommodate these entries.
+  ASSERT(dir_add(dir, ".", current_inode_sector, FILE_TYPE_DIR));
+  ASSERT(dir_add(dir, "..", parent_inode_sector, FILE_TYPE_DIR));
 }
 
 /**

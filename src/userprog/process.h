@@ -78,5 +78,6 @@ void pthread_exit_main(void);
 
 struct dir* process_cwd(struct process* process);
 void process_set_cwd(block_sector_t sector);
+bool process_cwd_matches_sector(block_sector_t sector);
 
 #endif /* userprog/process.h */

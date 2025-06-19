@@ -6,6 +6,7 @@
 #include "filesys/inode.h"
 #include "threads/malloc.h"
 #include "filesys/abstract-file.h"
+#include "userprog/process.h"
 
 /* A directory. */
 struct dir {
@@ -92,17 +93,22 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
   return false;
 }
 
-/* Searches DIR for a file with the given NAME
-   and returns true if one exists, false otherwise.
-   On success, sets *INODE to an inode for the file, otherwise to
-   a null pointer.  The caller must close *INODE. */
-bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
+/**
+ * @brief Looks up a directory entry by name and returns its inode.
+ * @param dir The directory to search in.
+ * @param name The name of the entry to look up.
+ * @param inode Output parameter: pointer to the found inode, or NULL if not found.
+ * @param ofsp Output parameter: offset of the directory entry, or undefined on failure.
+ * @return true if the entry was found and the inode was successfully opened;
+ *         false otherwise (entry not found or inode open failed).
+ */
+bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode, off_t* ofsp) {
   struct dir_entry e;
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
-  if (lookup(dir, name, &e, NULL))
+  if (lookup(dir, name, &e, ofsp))
     *inode = inode_open(e.inode_sector, e.type);
   else
     *inode = NULL;
@@ -154,37 +160,41 @@ done:
   return success;
 }
 
-/* Removes any entry for NAME in DIR.
-   Returns true if successful, false on failure,
-   which occurs only if there is no file with the given NAME. */
-bool dir_remove(struct dir* dir, const char* name) {
-  struct dir_entry e;
-  struct inode* inode = NULL;
-  bool success = false;
-  off_t ofs;
-
+/**
+ * @brief Removes a directory entry by marking it as unused and freeing its inode.
+ * @param dir The directory containing the entry to remove.
+ * @param inode The inode of the entry to remove.
+ * @param ofs The offset of the directory entry within the directory.
+ * @return true if the entry was successfully removed;
+ *         false if the entry could not be removed (e.g., root directory, non-empty directory, inode in use).
+ * @details This function marks the directory entry as unused and decrements the directory's entry count.
+ *          The root directory, non-empty directories, and directories in use (open or current working directory)
+ *          cannot be removed. The inode is always closed, even on failure.
+ */
+bool dir_remove(struct dir* dir, struct inode* inode, off_t ofs) {
   ASSERT(dir != NULL);
-  ASSERT(name != NULL);
+  ASSERT(inode != NULL);
+  bool success = false;
 
-  /* Find directory entry. */
-  if (!lookup(dir, name, &e, &ofs))
-    goto done;
+  if (inode == NULL || inode_get_inumber(inode) == ROOT_DIR_SECTOR) {
+    // Cannot remove the root directory.
+    goto cleanup;
+  }
 
-  /* Open inode. */
-  inode = inode_open(e.inode_sector, e.type);
-  if (inode == NULL)
-    goto done;
+  if (inode_isdir(inode) && (!inode_directory_is_empty(inode) || inode_get_open_count(inode) > 1 ||
+                             process_cwd_matches_sector(inode_get_inumber(inode)))) {
+    // Cannot remove a non-empty directory or one that is currently in use.
+    goto cleanup;
+  }
 
-  /* Erase directory entry. */
-  e.in_use = false;
-  if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
-    goto done;
+  struct dir_entry e = {.in_use = false};
+  success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
+  if (success) {
+    inode_remove(inode);
+    decrement_dir_entry_count(dir->inode, 1);
+  }
 
-  /* Remove inode. */
-  inode_remove(inode);
-  success = true;
-
-done:
+cleanup:
   inode_close(inode);
   return success;
 }
@@ -207,3 +217,5 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
   }
   return false;
 }
+
+size_t dir_entry_size(void) { return sizeof(struct dir_entry); }
