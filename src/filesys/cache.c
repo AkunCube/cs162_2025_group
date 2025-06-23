@@ -400,3 +400,27 @@ void write_to_cache(block_sector_t sector, const void* user_buffer, off_t sector
   cond_signal(&cache->access_cond, &fc.global_lock); // Wake up any waiting threads
   lock_release(&fc.global_lock);
 }
+
+/**
+ * @brief Flush all dirty cache blocks to storage and clear dirty flags
+ * 
+ * This function iterates through all cache slots in the file cache pool,
+ * writing any cache blocks marked as "dirty" (CACHE_DIRTY) to disk to ensure
+ * modifications in memory are persisted. After writing, it clears the dirty flag
+ * for each block. Thread safety is ensured via a global lock.
+ */
+void save_all_caches_to_storage() {
+  lock_acquire(&fc.global_lock);
+
+  for (int i = 0; i < MAX_FILE_CACHES; i++) {
+    CacheSlot* cache = &fc.cache_slots[i];
+    if (cache->status_flags & CACHE_DIRTY) {
+      ASSERT(cache->status_flags & CACHE_VALID);
+      // Write dirty caches back to disk.
+      block_write(fs_device, cache->sector_id, cache->data);
+      cache->status_flags &= ~CACHE_DIRTY; // Clear dirty flag after writing.
+    }
+  }
+
+  lock_release(&fc.global_lock);
+}
