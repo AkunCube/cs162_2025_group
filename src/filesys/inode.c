@@ -80,6 +80,10 @@ static inline size_t doubly_indirect_second_level_index(block_idx_t sector_idx) 
   return (sector_idx - MAX_SINGLE_INDIRECT_SIZE) % INDIRECT_POINTERS;
 }
 
+static inline block_idx_t length2block_index(off_t length) {
+  return length == 0 ? 0 : (length - 1) / BLOCK_SECTOR_SIZE;
+}
+
 /**
  * @brief Translates a byte position within a file to the corresponding disk sector.
  * 
@@ -463,7 +467,7 @@ static bool extend_file_sectors(struct inode_disk* disk_inode, off_t offset, off
   }
 
   block_idx_t current_sector = DIV_ROUND_UP(disk_inode->length, BLOCK_SECTOR_SIZE);
-  block_idx_t const old_end_idx = disk_inode->length / BLOCK_SECTOR_SIZE;
+  block_idx_t const old_end_idx = length2block_index(disk_inode->length);
   size_t sector_idx = 0;
 
   //* 1. Handle direct pointer allocation.
@@ -520,11 +524,12 @@ static bool extend_file_sectors(struct inode_disk* disk_inode, off_t offset, off
 
     // Calculate the range of first-level blocks we need to fill.
     const size_t start_level = doubly_indirect_first_level_index(current_sector);
-    const size_t end_level = doubly_indirect_first_level_index((offset + size) / BLOCK_SECTOR_SIZE);
+    const size_t end_level = doubly_indirect_first_level_index(length2block_index(offset + size));
 
     for (size_t level = start_level; level <= end_level; ++level) {
       const size_t sl_offset = doubly_indirect_second_level_index(current_sector);
       const size_t sl_alloc = MIN(sectors_to_add, INDIRECT_POINTERS - sl_offset);
+      ASSERT(sl_alloc > 0); // We should always allocate at least one sector.
       if (sl_offset == 0) {
         // We are at the start of a new second-level block.
         // Then we need to allocate a new first-level block.
