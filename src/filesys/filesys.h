@@ -14,7 +14,12 @@ extern struct block* fs_device;
 void filesys_init(bool format);
 void filesys_done(void);
 bool filesys_create(const char* name, off_t initial_size);
-struct file* filesys_open(const char* name);
+struct abstract_file* filesys_open(const char* name);
 bool filesys_remove(const char* name);
+bool filesys_mkdir(const char* name);
+bool filesys_chdir(const char* name);
+int filesys_get_inumber(const struct abstract_file* af);
+void filesys_close(struct abstract_file* af);
+void filesys_reset_disk_cnt(void);
 
 #endif /* filesys/filesys.h */

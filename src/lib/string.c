@@ -332,4 +332,40 @@ size_t strlcat(char* dst, const char* src, size_t size) {
   return src_len + dst_len;
 }
 
+/**
+ * @brief Trims leading and trailing whitespace from a string.
+ * 
+ * Modifies the input string in-place to remove:
+ * - Leading spaces (' ')
+ * - Trailing spaces (' ')
+ * 
+ * @param str The string to trim. Modified in-place.
+ */
+void trim(char* str) {
+  if (str == NULL)
+    return;
+
+  // Trim leading spaces
+  char* dst = str;
+  while (*str == ' ')
+    str++;
+
+  // Copy non-space characters back to the start
+  char* src = str;
+  while (*src != '\0') {
+    *dst++ = *src++;
+  }
+
+  // Trim trailing spaces by backtracking
+  if (dst != str) { // Avoid underflow if string was all spaces
+    dst--;          // Point to last non-null character
+    while (dst >= str && *dst == ' ') {
+      dst--;
+    }
+    *(dst + 1) = '\0'; // Null-terminate after last non-space character
+  } else {
+    *str = '\0'; // Handle empty string or all spaces
+  }
+}
+
 #pragma GCC diagnostic pop

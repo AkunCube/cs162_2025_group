@@ -22,22 +22,27 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "filesys/abstract-file.h"
 
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(char* user_cmd, void (**eip)(void), void** esp);
+static bool load(const char** user_argv, int argc, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 static void handle_exit_wait_status(struct thread* cur, int exit_code);
 static void handle_exit_close_files(struct thread* cur);
 static Wait_status* new_and_init_wait_status(pid_t pid);
 static void perform_fork_operations(void* args);
+static int parse_user_command(char* user_cmd, const char* user_argv[], const int max_args);
 
 typedef struct {
   char* command;
   struct process* parent;
   struct semaphore pexec_sema; // Parent waiting for child loading.
   bool load_success;
+#define MAX_ARGS 64
+  const char* user_argv[MAX_ARGS];
+  int argc;
 } start_process_args;
 
 typedef struct {
@@ -49,10 +54,13 @@ typedef struct {
 
 static void init_start_process_args(start_process_args* args, char* command) {
   args->command = command;
+  // Parse the user command to get the executable name and arguments
+  args->argc = parse_user_command(command, args->user_argv, MAX_ARGS);
   args->parent = thread_current()->pcb;
   args->load_success = false;
   sema_init(&args->pexec_sema, 0);
 }
+#undef MAX_ARGS
 
 static void init_fork_process_args(fork_process_args* args, const struct intr_frame* if_) {
   args->if_ = if_;
@@ -83,6 +91,7 @@ void userprog_init(void) {
   t->pcb->pid = get_pid(t->pcb);
   t->pcb->ppid = -1;
   t->pcb->elf_file = NULL;
+  t->pcb->cwd_inode_sector = ROOT_DIR_SECTOR; // Start with root directory
   list_init(&t->pcb->children);
 }
 
@@ -108,8 +117,8 @@ pid_t process_execute(const char* command) {
   // Initialize the args struct, before we create a new thread.
   init_start_process_args(sargs, fn_copy);
 
-  /* Create a new thread to execute COMMAND. */
-  tid = thread_create(command, PRI_DEFAULT, start_process, sargs);
+  // Since we already have parsed the command line, we can pass the name here.
+  tid = thread_create(sargs->user_argv[0], PRI_DEFAULT, start_process, sargs);
   if (tid == TID_ERROR) {
     palloc_free_page(fn_copy);
     free(sargs);
@@ -151,6 +160,8 @@ static void start_process(void* sargs) {
   start_process_args* args = (start_process_args*)sargs;
   struct process* parent = args->parent;
   char* user_cmd = (char*)args->command;
+  const char** user_argv = args->user_argv;
+  int argc = args->argc;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
@@ -171,6 +182,7 @@ static void start_process(void* sargs) {
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
+    t->pcb->cwd_inode_sector = parent->cwd_inode_sector; // Inherit parent's cwd
     list_init(&t->pcb->children);
     // Clear the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
@@ -195,7 +207,7 @@ static void start_process(void* sargs) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(user_cmd, &if_.eip, &if_.esp);
+    success = load(user_argv, argc, &if_.eip, &if_.esp);
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -413,7 +425,7 @@ static int parse_user_command(char* user_cmd, const char* user_argv[], const int
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(char* user_cmd, void (**eip)(void), void** esp) {
+bool load(const char** user_argv, int argc, void (**eip)(void), void** esp) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
@@ -427,22 +439,18 @@ bool load(char* user_cmd, void (**eip)(void), void** esp) {
     goto done;
   process_activate();
 
-// Parse the user command to get the executable name and arguments
-#define MAX_ARGS 64
-  static const char* user_argv[MAX_ARGS] = {NULL};
-  int argc = parse_user_command(user_cmd, user_argv, MAX_ARGS);
-#undef MAX_ARGS
   ASSERT(argc > 0);
   ASSERT(user_argv[0] != NULL);
 
   const char* file_name = user_argv[0];
 
   /* Open executable file. */
-  file = filesys_open(file_name);
-  if (file == NULL) {
+  struct abstract_file* af = filesys_open(file_name);
+  if (af == NULL || !abstract_file_is_file(af)) {
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
+  file = to_file(af);
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
@@ -821,11 +829,12 @@ static Wait_status* new_and_init_wait_status(pid_t pid) {
 static void handle_exit_close_files(struct thread* cur) {
   // Close all open files.
   for (int i = 2; i < MAX_OPEN_FILE; ++i) {
-    struct file* of = cur->pcb->ofile[i];
-    if (of != NULL) {
-      file_close(of);
-      cur->pcb->ofile[i] = NULL;
+    struct abstract_file* af = cur->pcb->ofile[i];
+    if (af == NULL) {
+      continue;
     }
+    filesys_close(af);
+    cur->pcb->ofile[i] = NULL;
   }
   // Close elf file.
   if (cur->pcb->elf_file != NULL) {
@@ -864,10 +873,17 @@ static void perform_fork_operations(void* args) {
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
     t->pcb->pid = get_pid(t->pcb);
     t->pcb->ppid = parent->pid;
+    t->pcb->cwd_inode_sector = parent->cwd_inode_sector;
     list_init(&t->pcb->children);
     // Copy the user open files.
     for (int i = 0; i < MAX_OPEN_FILE; ++i) {
-      t->pcb->ofile[i] = share_file(parent->ofile[i]);
+      if (parent->ofile[i] == NULL) {
+        t->pcb->ofile[i] = NULL;
+        continue;
+      }
+      // TODO: support directories.
+      ASSERT(abstract_file_is_file(parent->ofile[i]));
+      t->pcb->ofile[i] = to_af(share_file(to_file(parent->ofile[i])));
     }
 
     t->pcb->elf_file = share_file(parent->elf_file);
@@ -918,4 +934,43 @@ static void perform_fork_operations(void* args) {
   }
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&cur_if) : "memory");
   NOT_REACHED();
+}
+
+/**
+ * @brief Retrieves and opens the current working directory of a process.
+ * 
+ * Returns an open directory handle for the process's CWD, 
+ * using its stored inode sector number. Caller must close the directory.
+ * 
+ * @param process The target process.
+ * @return Open directory handle, or NULL on error.
+ */
+struct dir* process_cwd(struct process* process) {
+  ASSERT(process != NULL);
+  return dir_open(inode_open(process->cwd_inode_sector, FILE_TYPE_DIR));
+}
+
+/**
+ * @brief Sets the current working directory (CWD) for the calling thread's process.
+ * 
+ * Updates the process's CWD to the specified inode sector.
+ * Caller must ensure the sector corresponds to a valid directory inode.
+ * 
+ * @param sector The inode sector number of the new CWD.
+ */
+void process_set_cwd(block_sector_t sector) { thread_current()->pcb->cwd_inode_sector = sector; }
+
+/**
+ * @brief Checks if the current process's working directory matches the given sector.
+ 
+ * @param sector The inode sector number to compare against the current working directory.
+ * @return true if the current process's working directory matches the specified sector;
+ *         false if the process has no PCB or the sectors do not match.
+ */
+bool process_cwd_matches_sector(block_sector_t sector) {
+  struct thread* t = thread_current();
+  if (t->pcb == NULL) {
+    return false;
+  }
+  return t->pcb->cwd_inode_sector == sector;
 }

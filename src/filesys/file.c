@@ -3,14 +3,16 @@
 #include "filesys/inode.h"
 #include "threads/malloc.h"
 #include "threads/synch.h"
+#include "filesys/abstract-file.h"
 
 /* An open file. */
 struct file {
-  struct inode* inode;   /* File's inode. */
-  off_t pos;             /* Current position. */
-  bool deny_write;       /* Has file_deny_write() been called? */
-  int use_cnt;           /* Number of users. */
-  struct lock file_lock; /* Lock for this file. */
+  struct abstract_file af; /* Abstract file interface. */
+  struct inode* inode;     /* File's inode. */
+  off_t pos;               /* Current position. */
+  bool deny_write;         /* Has file_deny_write() been called? */
+  int use_cnt;             /* Number of users. */
+  struct lock file_lock;   /* Lock for this file. */
 };
 
 /* Opens a file for the given INODE, of which it takes ownership,
@@ -20,6 +22,7 @@ struct file* file_open(struct inode* inode) {
   struct file* file = calloc(1, sizeof *file);
   if (inode != NULL && file != NULL) {
     lock_init(&file->file_lock);
+    file->af.type = FILE_TYPE_FILE;
     file->inode = inode;
     file->pos = 0;
     file->deny_write = false;

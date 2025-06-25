@@ -6,10 +6,11 @@
 #include "devices/block.h"
 
 struct bitmap;
+enum file_type;
 
 void inode_init(void);
 bool inode_create(block_sector_t, off_t);
-struct inode* inode_open(block_sector_t);
+struct inode* inode_open(block_sector_t sector, enum file_type type);
 struct inode* inode_reopen(struct inode*);
 block_sector_t inode_get_inumber(const struct inode*);
 void inode_close(struct inode*);
@@ -19,5 +20,12 @@ off_t inode_write_at(struct inode*, const void*, off_t size, off_t offset);
 void inode_deny_write(struct inode*);
 void inode_allow_write(struct inode*);
 off_t inode_length(const struct inode*);
+
+bool inode_isdir(const struct inode* inode);
+bool inode_isfile(const struct inode* inode);
+void increment_dir_entry_count(struct inode* inode, uint32_t num);
+void decrement_dir_entry_count(struct inode* inode, uint32_t num);
+int inode_get_open_count(struct inode* inode);
+bool inode_directory_is_empty(const struct inode* inode);
 
 #endif /* filesys/inode.h */

@@ -5,17 +5,21 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "filesys/abstract-file.h"
+#include "userprog/process.h"
 
 /* A directory. */
 struct dir {
-  struct inode* inode; /* Backing store. */
-  off_t pos;           /* Current position. */
+  struct abstract_file af; /* Abstract file interface. */
+  struct inode* inode;     /* Backing store. */
+  off_t pos;               /* Current position. */
 };
 
 /* A single directory entry. */
 struct dir_entry {
   block_sector_t inode_sector; /* Sector number of header. */
   char name[NAME_MAX + 1];     /* Null terminated file name. */
+  enum file_type type;         /* Type of the file (file or directory). */
   bool in_use;                 /* In use or free? */
 };
 
@@ -30,6 +34,7 @@ bool dir_create(block_sector_t sector, size_t entry_cnt) {
 struct dir* dir_open(struct inode* inode) {
   struct dir* dir = calloc(1, sizeof *dir);
   if (inode != NULL && dir != NULL) {
+    dir->af.type = FILE_TYPE_DIR;
     dir->inode = inode;
     dir->pos = 0;
     return dir;
@@ -43,7 +48,7 @@ struct dir* dir_open(struct inode* inode) {
 /* Opens the root directory and returns a directory for it.
    Return true if successful, false on failure. */
 struct dir* dir_open_root(void) {
-  return dir_open(inode_open(ROOT_DIR_SECTOR));
+  return dir_open(inode_open(ROOT_DIR_SECTOR, FILE_TYPE_DIR));
 }
 
 /* Opens and returns a new directory for the same inode as DIR.
@@ -88,18 +93,23 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
   return false;
 }
 
-/* Searches DIR for a file with the given NAME
-   and returns true if one exists, false otherwise.
-   On success, sets *INODE to an inode for the file, otherwise to
-   a null pointer.  The caller must close *INODE. */
-bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
+/**
+ * @brief Looks up a directory entry by name and returns its inode.
+ * @param dir The directory to search in.
+ * @param name The name of the entry to look up.
+ * @param inode Output parameter: pointer to the found inode, or NULL if not found.
+ * @param ofsp Output parameter: offset of the directory entry, or undefined on failure.
+ * @return true if the entry was found and the inode was successfully opened;
+ *         false otherwise (entry not found or inode open failed).
+ */
+bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode, off_t* ofsp) {
   struct dir_entry e;
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
-  if (lookup(dir, name, &e, NULL))
-    *inode = inode_open(e.inode_sector);
+  if (lookup(dir, name, &e, ofsp))
+    *inode = inode_open(e.inode_sector, e.type);
   else
     *inode = NULL;
 
@@ -112,7 +122,7 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
    Returns true if successful, false on failure.
    Fails if NAME is invalid (i.e. too long) or a disk or memory
    error occurs. */
-bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
+bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector, enum file_type type) {
   struct dir_entry e;
   off_t ofs;
   bool success = false;
@@ -143,43 +153,48 @@ bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   e.in_use = true;
   strlcpy(e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
+  e.type = type;
   success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
 
 done:
   return success;
 }
 
-/* Removes any entry for NAME in DIR.
-   Returns true if successful, false on failure,
-   which occurs only if there is no file with the given NAME. */
-bool dir_remove(struct dir* dir, const char* name) {
-  struct dir_entry e;
-  struct inode* inode = NULL;
-  bool success = false;
-  off_t ofs;
-
+/**
+ * @brief Removes a directory entry by marking it as unused and freeing its inode.
+ * @param dir The directory containing the entry to remove.
+ * @param inode The inode of the entry to remove.
+ * @param ofs The offset of the directory entry within the directory.
+ * @return true if the entry was successfully removed;
+ *         false if the entry could not be removed (e.g., root directory, non-empty directory, inode in use).
+ * @details This function marks the directory entry as unused and decrements the directory's entry count.
+ *          The root directory, non-empty directories, and directories in use (open or current working directory)
+ *          cannot be removed. The inode is always closed, even on failure.
+ */
+bool dir_remove(struct dir* dir, struct inode* inode, off_t ofs) {
   ASSERT(dir != NULL);
-  ASSERT(name != NULL);
+  ASSERT(inode != NULL);
+  bool success = false;
 
-  /* Find directory entry. */
-  if (!lookup(dir, name, &e, &ofs))
-    goto done;
+  if (inode == NULL || inode_get_inumber(inode) == ROOT_DIR_SECTOR) {
+    // Cannot remove the root directory.
+    goto cleanup;
+  }
 
-  /* Open inode. */
-  inode = inode_open(e.inode_sector);
-  if (inode == NULL)
-    goto done;
+  if (inode_isdir(inode) && (!inode_directory_is_empty(inode) || inode_get_open_count(inode) > 1 ||
+                             process_cwd_matches_sector(inode_get_inumber(inode)))) {
+    // Cannot remove a non-empty directory or one that is currently in use.
+    goto cleanup;
+  }
 
-  /* Erase directory entry. */
-  e.in_use = false;
-  if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
-    goto done;
+  struct dir_entry e = {.in_use = false};
+  success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
+  if (success) {
+    inode_remove(inode);
+    decrement_dir_entry_count(dir->inode, 1);
+  }
 
-  /* Remove inode. */
-  inode_remove(inode);
-  success = true;
-
-done:
+cleanup:
   inode_close(inode);
   return success;
 }
@@ -192,10 +207,15 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
 
   while (inode_read_at(dir->inode, &e, sizeof e, dir->pos) == sizeof e) {
     dir->pos += sizeof e;
-    if (e.in_use) {
-      strlcpy(name, e.name, NAME_MAX + 1);
-      return true;
-    }
+    if (!e.in_use)
+      continue; // Skip free entries.
+    if (!strcmp(e.name, ".") || !strcmp(e.name, ".."))
+      continue; // Skip special entries.
+
+    strlcpy(name, e.name, NAME_MAX + 1);
+    return true;
   }
   return false;
 }
+
+size_t dir_entry_size(void) { return sizeof(struct dir_entry); }

@@ -13,26 +13,45 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "threads/vaddr.h"
+#include "filesys/abstract-file.h"
 #include "debug.h"
 #include <float.h>
 
 static void syscall_handler(struct intr_frame*);
 static void validate_buffer_in_user_region(const void* buffer, size_t size);
 static void validate_string_in_user_region(const char* string);
-static struct file* validate_file_descriptor(int fd);
+static struct abstract_file* validate_abstract_file_descriptor(int fd);
 static int fd_alloc(struct process* pcb);
-static struct lock fileop_lock;
+// static struct lock fileop_lock;
 void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
-  lock_init(&fileop_lock);
+  // lock_init(&fileop_lock);
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,   [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,     [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create, [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,     [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,     [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_WRITE] = sys_write,
+    [SYS_PRACTICE] = sys_practice,
+    [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,
+    [SYS_EXIT] = sys_exit,
+    [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,
+    [SYS_OPEN] = sys_open,
+    [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,
+    [SYS_CLOSE] = sys_close,
+    [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek,
+    [SYS_REMOVE] = sys_remove,
+    [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_INUMBER] = sys_inumber,
+    [SYS_MKDIR] = sys_mkdir,
+    [SYS_ISDIR] = sys_isdir,
+    [SYS_CHDIR] = sys_chdir,
+    [SYS_READDIR] = sys_readdir,
+    [SYS_DISK_RESET_CNT] = sys_disk_reset_cnt,
+    [SYS_DISK_READ_CNT] = sys_disk_get_read_cnt,
+    [SYS_DISK_WRITE_CNT] = sys_disk_get_write_cnt,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -75,20 +94,17 @@ uint32_t sys_write(uint32_t* args) {
   }
 
   if (fd == STDOUT_FILENO) {
-    lock_acquire(&fileop_lock);
     putbuf(buffer, size);
-    lock_release(&fileop_lock);
     return size;
   } else if (fd == STDIN_FILENO) {
     return -1;
   } else {
-    struct file* of = thread_current()->pcb->ofile[fd];
-    if (of == NULL) {
+    struct abstract_file* af = thread_current()->pcb->ofile[fd];
+    if (af == NULL || !abstract_file_is_file(af)) {
       return -1;
     }
-    lock_acquire(&fileop_lock);
-    off_t bytes_written = file_write(of, buffer, size);
-    lock_release(&fileop_lock);
+
+    off_t bytes_written = file_write(to_file(af), buffer, size);
     return bytes_written;
   }
 
@@ -132,9 +148,7 @@ uint32_t sys_create(uint32_t* args) {
   unsigned initial_size = (unsigned)args[1];
   validate_string_in_user_region((const char*)args[0]);
 
-  lock_acquire(&fileop_lock);
   bool success = filesys_create(file_name, initial_size);
-  lock_release(&fileop_lock);
 
   return success;
 }
@@ -144,18 +158,15 @@ uint32_t sys_open(uint32_t* args) {
   const char* file_name = (const char*)args[0];
   validate_string_in_user_region(file_name);
 
-  struct file* of = NULL;
-  lock_acquire(&fileop_lock);
-  of = filesys_open(file_name);
-  lock_release(&fileop_lock);
-
-  if (of == NULL) {
+  struct abstract_file* af = NULL;
+  af = filesys_open(file_name);
+  if (af == NULL) {
     return -1;
   }
   struct process* pcb = thread_current()->pcb;
   int fd = fd_alloc(pcb);
   if (fd > 0) {
-    pcb->ofile[fd] = of;
+    pcb->ofile[fd] = af;
   }
   return fd;
 }
@@ -164,14 +175,12 @@ uint32_t sys_filesize(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
 
-  struct file* of = validate_file_descriptor(fd);
-  if (of == NULL) {
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL || !abstract_file_is_file(af)) {
     return -1;
   }
 
-  lock_acquire(&fileop_lock);
-  off_t size = file_length(of);
-  lock_release(&fileop_lock);
+  off_t size = file_length(to_file(af));
   return size;
 }
 
@@ -188,23 +197,23 @@ uint32_t sys_read(uint32_t* args) {
   if (fd == STDIN_FILENO) {
     unsigned i = 0;
     uint8_t ch;
-    lock_acquire(&fileop_lock);
+
     for (i = 0; i < size; ++i) {
       ch = buffer[i] = input_getc();
       if (ch == '\n') {
         break;
       }
     }
-    lock_release(&fileop_lock);
+
     return i;
   } else {
-    struct file* of = thread_current()->pcb->ofile[fd];
-    if (of == NULL) {
+    struct abstract_file* af = thread_current()->pcb->ofile[fd];
+    if (af == NULL || !abstract_file_is_file(af)) {
       return -1;
     }
-    lock_acquire(&fileop_lock);
-    off_t bytes_read = file_read(of, buffer, size);
-    lock_release(&fileop_lock);
+
+    off_t bytes_read = file_read(to_file(af), buffer, size);
+
     return bytes_read;
   }
 }
@@ -213,14 +222,13 @@ uint32_t sys_close(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
 
-  struct file* of = validate_file_descriptor(fd);
-  if (of == NULL) {
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
-  file_close(of);
+
+  filesys_close(af);
   thread_current()->pcb->ofile[fd] = NULL;
-  lock_release(&fileop_lock);
   return 0;
 }
 
@@ -228,13 +236,11 @@ uint32_t sys_tell(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int fd = (int)args[0];
 
-  struct file* of = validate_file_descriptor(fd);
-  if (of == NULL) {
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL || !abstract_file_is_file(af)) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
-  off_t res = file_tell(of);
-  lock_release(&fileop_lock);
+  off_t res = file_tell(to_file(af));
   return res;
 }
 
@@ -243,13 +249,12 @@ uint32_t sys_seek(uint32_t* args) {
   int fd = (int)args[0];
   unsigned position = (unsigned)args[1];
 
-  struct file* of = validate_file_descriptor(fd);
-  if (of == NULL) {
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL || !abstract_file_is_file(af)) {
     return -1;
   }
-  lock_acquire(&fileop_lock);
-  file_seek(of, position);
-  lock_release(&fileop_lock);
+
+  file_seek(to_file(af), position);
   return 0;
 }
 
@@ -258,9 +263,7 @@ uint32_t sys_remove(uint32_t* args) {
   const char* file_name = (const char*)args[0];
   validate_string_in_user_region(file_name);
 
-  lock_acquire(&fileop_lock);
   bool success = filesys_remove(file_name);
-  lock_release(&fileop_lock);
   return success;
 }
 
@@ -268,6 +271,74 @@ uint32_t sys_compute_e(uint32_t* args) {
   validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
   int n = (int)args[0];
   return sys_sum_to_e(n);
+}
+
+uint32_t sys_inumber(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL) {
+    return -1;
+  }
+
+  return filesys_get_inumber(af);
+}
+
+uint32_t sys_mkdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* dir_name = (const char*)args[0];
+  validate_string_in_user_region(dir_name);
+
+  return filesys_mkdir(dir_name);
+}
+
+uint32_t sys_chdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  const char* dir_name = (const char*)args[0];
+  validate_string_in_user_region(dir_name);
+
+  return filesys_chdir(dir_name);
+}
+
+uint32_t sys_isdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 1 * sizeof(uint32_t));
+  int fd = (int)args[0];
+
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL) {
+    return false;
+  }
+  return abstract_file_is_dir(af);
+}
+
+uint32_t sys_readdir(uint32_t* args) {
+  validate_buffer_in_user_region(args, 2 * sizeof(uint32_t));
+  int fd = (int)args[0];
+  char* name = (char*)args[1];
+
+  struct abstract_file* af = validate_abstract_file_descriptor(fd);
+  if (af == NULL || !abstract_file_is_dir(af)) {
+    return 0;
+  }
+
+  return dir_readdir(to_dir(af), name);
+}
+
+uint32_t sys_disk_reset_cnt(uint32_t* args UNUSED) {
+  // Reset the disk read/write count.
+  filesys_reset_disk_cnt();
+  return 0;
+}
+
+uint32_t sys_disk_get_read_cnt(uint32_t* args UNUSED) {
+  // Get the disk read count.
+  return block_get_read_cnt(fs_device);
+}
+
+uint32_t sys_disk_get_write_cnt(uint32_t* args UNUSED) {
+  // Get the disk write count.
+  return block_get_write_cnt(fs_device);
 }
 
 /********************************************************/
@@ -336,12 +407,15 @@ static int fd_alloc(struct process* pcb) {
 }
 
 /**
- * @brief Validate the file descriptor.
+ * @brief Validates a file descriptor and returns the corresponding abstract file pointer.
  * 
- * @param fd 
- * @return struct file* Return the file pointer if valid, otherwise NULL.
+ * Checks if the given file descriptor is within a valid range and retrieves the associated 
+ * abstract file structure. Returns NULL if the descriptor is invalid.
+ * 
+ * @param fd The file descriptor to validate.
+ * @return struct abstract_file* A pointer to the abstract file if valid; otherwise, NULL.
  */
-static struct file* validate_file_descriptor(int fd) {
+static struct abstract_file* validate_abstract_file_descriptor(int fd) {
   if (fd < 0 || fd >= MAX_OPEN_FILE) {
     return NULL;
   }

@@ -13,6 +13,9 @@
 /* Index of a block device sector.
    Good enough for devices up to 2 TB. */
 typedef uint32_t block_sector_t;
+typedef size_t block_idx_t;
+
+#define BLOCK_NOT_FOUND ((block_sector_t)-1)
 
 /* Format specifier for printf(), e.g.:
    printf ("sector=%"PRDSNu"\n", sector); */
@@ -67,5 +70,8 @@ struct block_operations {
 
 struct block* block_register(const char* name, enum block_type, const char* extra_info,
                              block_sector_t size, const struct block_operations*, void* aux);
+void block_reset_cnt(struct block* block);
+unsigned block_get_read_cnt(struct block* block);
+unsigned block_get_write_cnt(struct block* block);
 
 #endif /* devices/block.h */
