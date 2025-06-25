@@ -42,6 +42,8 @@ enum {
   SYS_ISDIR,   /* Tests if a fd represents a directory. */
   SYS_INUMBER, /* Returns the inode number for a fd. */
   SYS_DISK_RESET_CNT,
+  SYS_DISK_READ_CNT,
+  SYS_DISK_WRITE_CNT,
 };
 
 #endif /* lib/syscall-nr.h */

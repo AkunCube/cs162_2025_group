@@ -65,5 +65,7 @@ int inumber(int fd);
 
 pid_t fork(void);
 void disk_reset_cnt(void);
+unsigned get_disk_read_cnt(void);
+unsigned get_disk_write_cnt(void);
 
 #endif /* lib/user/syscall.h */

@@ -162,3 +162,7 @@ tid_t get_tid(void) { return syscall0(SYS_GET_TID); }
 pid_t fork(void) { return syscall0(SYS_FORK); }
 
 void disk_reset_cnt(void) { syscall0(SYS_DISK_RESET_CNT); }
+
+unsigned get_disk_read_cnt(void) { return syscall0(SYS_DISK_READ_CNT); }
+
+unsigned get_disk_write_cnt(void) { return syscall0(SYS_DISK_WRITE_CNT); }

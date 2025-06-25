@@ -181,3 +181,13 @@ void block_reset_cnt(struct block* block) {
   block->write_cnt = 0;
   block->read_cnt = 0;
 }
+
+unsigned block_get_read_cnt(struct block* block) {
+  ASSERT(block->type != BLOCK_FOREIGN);
+  return block->read_cnt;
+}
+
+unsigned block_get_write_cnt(struct block* block) {
+  ASSERT(block->type != BLOCK_FOREIGN);
+  return block->write_cnt;
+}

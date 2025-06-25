@@ -50,6 +50,8 @@ static uint32_t (*syscalls[])(uint32_t*) = {
     [SYS_CHDIR] = sys_chdir,
     [SYS_READDIR] = sys_readdir,
     [SYS_DISK_RESET_CNT] = sys_disk_reset_cnt,
+    [SYS_DISK_READ_CNT] = sys_disk_get_read_cnt,
+    [SYS_DISK_WRITE_CNT] = sys_disk_get_write_cnt,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -328,6 +330,17 @@ uint32_t sys_disk_reset_cnt(uint32_t* args UNUSED) {
   filesys_reset_disk_cnt();
   return 0;
 }
+
+uint32_t sys_disk_get_read_cnt(uint32_t* args UNUSED) {
+  // Get the disk read count.
+  return block_get_read_cnt(fs_device);
+}
+
+uint32_t sys_disk_get_write_cnt(uint32_t* args UNUSED) {
+  // Get the disk write count.
+  return block_get_write_cnt(fs_device);
+}
+
 /********************************************************/
 /* HELPER FUNCTIONS */
 
