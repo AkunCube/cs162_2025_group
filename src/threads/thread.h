@@ -125,10 +125,11 @@ struct thread {
 
 #ifdef USERPROG
   /* Owned by process.c. */
-  struct process* pcb;      /* Process control block if this thread is a userprog */
-  Join_status* join_status; /* Join status for this thread */
-  struct list user_stack;   /* User stack for this thread */
-  bool force_exit;          /* If true, the thread will exit immediately */
+  struct process* pcb;          /* Process control block if this thread is a userprog */
+  Join_status* join_status;     /* Join status for this thread */
+  struct list user_stack;       /* User stack for this thread */
+  bool force_exit;              /* If true, the thread will exit immediately */
+  bool is_being_forced_to_exit; /* If true, the thread is being forced to exit */
 #endif
 
   int64_t sleep_ticks;    /* Number of ticks to sleep */
