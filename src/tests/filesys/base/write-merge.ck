@@ -10,6 +10,7 @@ check_expected (IGNORE_EXIT_CODES => 1, [<<'EOF']);
 (write-merge) seek "writemerge" to 0
 (write-merge) read "writemerge" with 'a' for 131072 bytes
 (write-merge) close "writemerge"
+(write-merge) write count is within limits
 (write-merge) end
 EOF
 pass;

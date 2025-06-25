@@ -6,6 +6,9 @@
 #include "tests/main.h"
 
 #define FILE_SIZE (128 * 1024) // 128 KiB
+#define BLOCKS (FILE_SIZE / 512)
+
+static inline bool write_count_in_limits(unsigned write_cnt) { return write_cnt <= BLOCKS * 2; }
 
 void test_main(void) {
 
@@ -43,4 +46,7 @@ void test_main(void) {
 
   msg("close \"%s\"", file_name);
   close(fd);
+
+  unsigned write_cnt = get_disk_write_cnt();
+  CHECK(write_count_in_limits(write_cnt), "write count is within limits");
 }
