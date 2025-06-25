@@ -11,6 +11,7 @@
 #include "threads/thread.h"
 #include "userprog/process.h"
 #include "filesys/abstract-file.h"
+#include "devices/timer.h"
 #include <string.h>
 
 /* Partition that contains the file system. */
@@ -25,6 +26,7 @@ static struct inode* resolve_last_path_component(struct dir** current_dir_p, cha
                                                  off_t* ofsp);
 static void initialize_dir_special_entries(struct dir* dir, block_sector_t current_inode_sector,
                                            block_sector_t parent_inode_sector);
+static void cache_periodic_flusher(void* aux);
 
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system. */
@@ -41,6 +43,12 @@ void filesys_init(bool format) {
     do_format();
 
   free_map_open();
+
+  struct semaphore flush_sema;
+  sema_init(&flush_sema, 0);
+  // Create a thread to flush cache blocks to disk.
+  thread_create("flush-cache", PRI_DEFAULT, cache_periodic_flusher, &flush_sema);
+  sema_down(&flush_sema);
 }
 
 /* Shuts down the file system module, writing any unwritten data
@@ -451,3 +459,25 @@ void filesys_close(struct abstract_file* af) {
 }
 
 void filesys_reset_disk_cnt(void) { block_reset_cnt(fs_device); }
+
+/**
+ * @brief Background task for periodic cache block flushing
+ * 
+ * This function runs as a background thread to periodically trigger
+ * flushing of all cached blocks to disk. It signals startup completion
+ * via a semaphore and then enters an infinite loop to flush caches
+ * at regular intervals.
+ * 
+ * @param aux Pointer to a semaphore used for synchronization
+ */
+static void cache_periodic_flusher(void* aux) {
+  struct semaphore* flush_sema = aux;
+  sema_up(flush_sema);
+#define FLUSH_INTERVAL_TICKS (200)
+
+  while (true) {
+    timer_sleep(FLUSH_INTERVAL_TICKS);
+    sync_all_cache_to_disk();
+  }
+#undef FLUSH_INTERVAL_TICKS
+}

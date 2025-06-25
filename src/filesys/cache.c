@@ -424,3 +424,45 @@ void save_all_caches_to_storage() {
 
   lock_release(&fc.global_lock);
 }
+
+/**
+ * @brief Flush all dirty cache entries to disk
+ * 
+ * Iterates through all active cache slots and writes any dirty blocks
+ * back to disk. This function handles concurrent access by:
+ * 1. Skipping slots marked for eviction
+ * 2. Waiting for locked slots to become available
+ * 3. Using conditional variables to signal completion
+ * 
+ * @note This operation ensures data persistence but may block if slots are busy
+ */
+void sync_all_cache_to_disk() {
+  lock_acquire(&fc.global_lock);
+
+  // Write all dirty caches to disk.
+  for (int i = 0; i < MAX_FILE_CACHES; ++i) {
+    CacheSlot* cache = &fc.cache_slots[i];
+    if (cache->status_flags & (CACHE_VALID | CACHE_DIRTY)) {
+      if (cache->status_flags & CACHE_BEING_EVICTED) {
+        // If the cache is already being evicted, skip it.
+        continue;
+      }
+
+      if (cache->status_flags & CACHE_LOCKED) {
+        // If the cache is locked, wait for it to be unlocked.
+        cond_wait(&cache->access_cond, &fc.global_lock);
+        ASSERT(!(cache->status_flags & CACHE_LOCKED));
+      }
+      cache->status_flags |= CACHE_LOCKED; // Lock the cache for exclusive access
+      // Write the dirty cache back to disk.
+      lock_release(&fc.global_lock);
+      block_write(fs_device, cache->sector_id, cache->data);
+      lock_acquire(&fc.global_lock);
+      cache->status_flags &= ~(CACHE_LOCKED | CACHE_DIRTY);
+      // Maybe some thread has been waiting for this cache to be unlocked.
+      cond_signal(&cache->access_cond, &fc.global_lock);
+    }
+  }
+
+  lock_release(&fc.global_lock);
+}
