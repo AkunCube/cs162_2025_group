@@ -499,6 +499,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
   t->force_exit = false;
+  t->is_being_forced_to_exit = false;
   list_init(&t->held_locks);
   list_init(&t->user_stack);
 
@@ -646,8 +647,10 @@ static void schedule(void) {
     frstor(fpu_state);
   }
   thread_switch_tail(prev);
-  if (thread_current()->force_exit) {
-    terminate_thread_immediately(thread_current());
+  struct thread* current = thread_current();
+  if (current->force_exit && !current->is_being_forced_to_exit) {
+    current->is_being_forced_to_exit = true;
+    terminate_thread_immediately(current);
   }
 }
 
