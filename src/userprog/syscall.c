@@ -29,13 +29,27 @@ void syscall_init(void) {
 }
 
 static uint32_t (*syscalls[])(uint32_t*) = {
-    [SYS_WRITE] = sys_write,     [SYS_PRACTICE] = sys_practice, [SYS_HALT] = sys_halt,
-    [SYS_EXEC] = sys_exec,       [SYS_EXIT] = sys_exit,         [SYS_WAIT] = sys_wait,
-    [SYS_CREATE] = sys_create,   [SYS_OPEN] = sys_open,         [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = sys_read,       [SYS_CLOSE] = sys_close,       [SYS_TELL] = sys_tell,
-    [SYS_SEEK] = sys_seek,       [SYS_REMOVE] = sys_remove,     [SYS_COMPUTE_E] = sys_compute_e,
-    [SYS_INUMBER] = sys_inumber, [SYS_MKDIR] = sys_mkdir,       [SYS_ISDIR] = sys_isdir,
-    [SYS_CHDIR] = sys_chdir,     [SYS_READDIR] = sys_readdir,
+    [SYS_WRITE] = sys_write,
+    [SYS_PRACTICE] = sys_practice,
+    [SYS_HALT] = sys_halt,
+    [SYS_EXEC] = sys_exec,
+    [SYS_EXIT] = sys_exit,
+    [SYS_WAIT] = sys_wait,
+    [SYS_CREATE] = sys_create,
+    [SYS_OPEN] = sys_open,
+    [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = sys_read,
+    [SYS_CLOSE] = sys_close,
+    [SYS_TELL] = sys_tell,
+    [SYS_SEEK] = sys_seek,
+    [SYS_REMOVE] = sys_remove,
+    [SYS_COMPUTE_E] = sys_compute_e,
+    [SYS_INUMBER] = sys_inumber,
+    [SYS_MKDIR] = sys_mkdir,
+    [SYS_ISDIR] = sys_isdir,
+    [SYS_CHDIR] = sys_chdir,
+    [SYS_READDIR] = sys_readdir,
+    [SYS_DISK_RESET_CNT] = sys_disk_reset_cnt,
 };
 
 static void syscall_handler(struct intr_frame* f) {
@@ -307,6 +321,12 @@ uint32_t sys_readdir(uint32_t* args) {
   }
 
   return dir_readdir(to_dir(af), name);
+}
+
+uint32_t sys_disk_reset_cnt(uint32_t* args UNUSED) {
+  // Reset the disk read/write count.
+  filesys_reset_disk_cnt();
+  return 0;
 }
 /********************************************************/
 /* HELPER FUNCTIONS */

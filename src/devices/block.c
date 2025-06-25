@@ -170,3 +170,14 @@ static struct block* list_elem_to_block(struct list_elem* list_elem) {
   return (list_elem != list_end(&all_blocks) ? list_entry(list_elem, struct block, list_elem)
                                              : NULL);
 }
+
+/**
+ * @brief Reset read/write counters of a block device (DEBUG ONLY)
+ * Resets read_cnt and write_cnt to zero. Asserts block is not FOREIGN.
+ * Intended for debugging IO operations; not for production use.
+ */
+void block_reset_cnt(struct block* block) {
+  ASSERT(block->type != BLOCK_FOREIGN);
+  block->write_cnt = 0;
+  block->read_cnt = 0;
+}

@@ -449,3 +449,5 @@ void filesys_close(struct abstract_file* af) {
     PANIC("Invalid abstract file type passed to filesys_close()");
   }
 }
+
+void filesys_reset_disk_cnt(void) { block_reset_cnt(fs_device); }

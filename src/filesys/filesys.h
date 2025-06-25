@@ -20,5 +20,6 @@ bool filesys_mkdir(const char* name);
 bool filesys_chdir(const char* name);
 int filesys_get_inumber(const struct abstract_file* af);
 void filesys_close(struct abstract_file* af);
+void filesys_reset_disk_cnt(void);
 
 #endif /* filesys/filesys.h */

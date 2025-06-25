@@ -24,5 +24,6 @@ uint32_t sys_mkdir(uint32_t*);
 uint32_t sys_isdir(uint32_t*);
 uint32_t sys_chdir(uint32_t*);
 uint32_t sys_readdir(uint32_t*);
+uint32_t sys_disk_reset_cnt(uint32_t*);
 
 #endif /* userprog/syscall.h */

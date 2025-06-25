@@ -64,5 +64,6 @@ bool isdir(int fd);
 int inumber(int fd);
 
 pid_t fork(void);
+void disk_reset_cnt(void);
 
 #endif /* lib/user/syscall.h */
